@@ -38,7 +38,6 @@ npm install dotenv
 ```env
 # .env
 DRIP_API_KEY=sk_test_...
-DRIP_API_URL=https://api.drippay.dev  # optional, defaults to this
 ```
 
 Load your `.env` at the top of your entry file:
@@ -64,6 +63,7 @@ The `drip` singleton reads `DRIP_API_KEY` from your environment automatically.
 ### Alternative: Explicit Configuration
 
 ```typescript
+import 'dotenv/config';
 import { Drip } from '@drip-sdk/node';
 
 // Auto-reads DRIP_API_KEY from environment
