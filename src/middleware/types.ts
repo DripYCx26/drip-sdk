@@ -245,6 +245,7 @@ export interface GenericRequest {
   url: string;
   headers: Record<string, string | string[] | undefined>;
   query?: Record<string, string | string[] | undefined>;
+  body?: unknown;
 }
 
 /**
