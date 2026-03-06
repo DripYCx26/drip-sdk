@@ -1901,6 +1901,9 @@ export class Drip {
    * ```
    */
   constructor(config: DripConfig = {}) {
+    // Auto-load .env files if dotenv is installed
+    try { require('dotenv').config(); } catch { /* dotenv not installed, skip */ }
+
     // Read from config or fall back to environment variables
     const apiKey = config.apiKey ?? (typeof process !== 'undefined' ? process.env.DRIP_API_KEY : undefined);
     const baseUrl = config.baseUrl ?? (typeof process !== 'undefined' ? (process.env.DRIP_API_URL ?? process.env.DRIP_BASE_URL) : undefined);
