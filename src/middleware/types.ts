@@ -79,6 +79,18 @@ export interface WithDripConfig<TRequest = unknown> {
    * Custom metadata to attach to each charge.
    */
   metadata?: Record<string, unknown> | ((request: TRequest) => Record<string, unknown>);
+
+  /**
+   * Optional allowlist of metadata keys permitted to be sent.
+   * If provided, keys not in the list are dropped.
+   */
+  metadataAllowlist?: string[];
+
+  /**
+   * Optional explicit metadata keys to redact before sending.
+   * Matching is case-insensitive.
+   */
+  redactMetadataKeys?: string[];
 }
 
 // ============================================================================

@@ -26,6 +26,7 @@
  * @packageDocumentation
  */
 
+import { createHash } from 'node:crypto';
 import { Drip } from '../index.js';
 
 // =============================================================================
@@ -71,6 +72,103 @@ export const ANTHROPIC_PRICING: Record<string, ModelPricing> = {
   'claude-2.0': { input: 8.0, output: 24.0 },
   'claude-instant-1.2': { input: 0.8, output: 2.4 },
 } as const;
+
+const SENSITIVE_METADATA_KEY_PATTERN =
+  /(authorization|api[_-]?key|secret|password|token|prompt|completion|output|input|request|response|body|cookie|set-cookie|email|phone|ssn|address|creditcard|card)/i;
+
+const DEFAULT_LANGCHAIN_METADATA_ALLOWLIST = [
+  'integration',
+  'model',
+  'modelFamily',
+  'toolName',
+  'retriever',
+  'chainType',
+  'eventType',
+  'statusCode',
+  'latencyMs',
+  'promptCount',
+  'inputTokens',
+  'outputTokens',
+  'totalTokens',
+  'documentCount',
+  'actionCount',
+  'inputLength',
+  'outputLength',
+  'queryLength',
+  'inputHash',
+  'queryHash',
+  'errorType',
+  'errorHash',
+] as const;
+
+const DEFAULT_LANGCHAIN_REDACT_KEYS = [
+  'prompt',
+  'prompts',
+  'message',
+  'messages',
+  'input',
+  'inputs',
+  'output',
+  'outputs',
+  'response',
+  'request',
+  'body',
+  'text',
+  'query',
+  'toolInput',
+  'tool_output',
+] as const;
+
+function hashText(value: string): string {
+  return createHash('sha256').update(value).digest('hex');
+}
+
+function isMetadataPrimitive(value: unknown): value is string | number | boolean | null {
+  if (value === null) {
+    return true;
+  }
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+function sanitizeMetadata(
+  metadata: Record<string, unknown> | undefined,
+  allowlist: ReadonlySet<string>,
+  redactKeys: ReadonlySet<string>,
+): Record<string, unknown> {
+  if (!metadata) {
+    return {};
+  }
+
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(metadata)) {
+    const normalizedKey = key.toLowerCase();
+
+    if (!allowlist.has(key) && !allowlist.has(normalizedKey)) {
+      continue;
+    }
+    if (redactKeys.has(key) || redactKeys.has(normalizedKey)) {
+      continue;
+    }
+    if (SENSITIVE_METADATA_KEY_PATTERN.test(key)) {
+      continue;
+    }
+    if (!isMetadataPrimitive(value)) {
+      continue;
+    }
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      continue;
+    }
+    if (typeof value === 'string' && value.length > 256) {
+      sanitized[key] = value.slice(0, 256);
+      continue;
+    }
+
+    sanitized[key] = value;
+  }
+
+  return sanitized;
+}
 
 /**
  * Get pricing for a model by name.
@@ -133,7 +231,7 @@ interface LLMCallState {
   runId: string;
   model: string;
   startTime: number;
-  prompts: string[];
+  promptCount: number;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -147,8 +245,8 @@ interface ToolCallState {
   runId: string;
   toolName: string;
   startTime: number;
-  inputStr: string;
-  outputStr: string;
+  inputHash: string;
+  inputLength: number;
   error: string | null;
 }
 
@@ -159,8 +257,7 @@ interface ChainCallState {
   runId: string;
   chainType: string;
   startTime: number;
-  inputs: Record<string, unknown>;
-  outputs: Record<string, unknown>;
+  inputKeyCount: number;
   error: string | null;
 }
 
@@ -170,12 +267,7 @@ interface ChainCallState {
 interface AgentCallState {
   runId: string;
   startTime: number;
-  actions: Array<{
-    tool: string;
-    toolInput: string;
-    log: string | null;
-  }>;
-  finalOutput: string | null;
+  actionCount: number;
   error: string | null;
 }
 
@@ -275,6 +367,17 @@ export interface DripCallbackHandlerOptions {
    * Additional metadata to attach to all events.
    */
   metadata?: Record<string, unknown>;
+
+  /**
+   * Allowed metadata keys that can be emitted by auto-tracking callbacks.
+   * Keys outside this list are dropped.
+   */
+  metadataAllowlist?: string[];
+
+  /**
+   * Metadata keys to force-redact before emission.
+   */
+  redactMetadataKeys?: string[];
 }
 
 // =============================================================================
@@ -312,6 +415,8 @@ export class DripCallbackHandler {
   private readonly _autoCreateRun: boolean;
   private readonly _emitOnError: boolean;
   private readonly _baseMetadata: Record<string, unknown>;
+  private readonly _metadataAllowlist: ReadonlySet<string>;
+  private readonly _redactMetadataKeys: ReadonlySet<string>;
 
   // Active tracking state
   private _currentRunId: string | null = null;
@@ -329,7 +434,25 @@ export class DripCallbackHandler {
     this._workflow = options.workflow ?? 'langchain';
     this._autoCreateRun = options.autoCreateRun ?? true;
     this._emitOnError = options.emitOnError ?? true;
-    this._baseMetadata = options.metadata ?? {};
+
+    const allowlist = options.metadataAllowlist ?? [...DEFAULT_LANGCHAIN_METADATA_ALLOWLIST];
+    this._metadataAllowlist = new Set([
+      ...allowlist,
+      ...allowlist.map((k) => k.toLowerCase()),
+      'integration',
+    ]);
+
+    const redactKeys = options.redactMetadataKeys ?? [...DEFAULT_LANGCHAIN_REDACT_KEYS];
+    this._redactMetadataKeys = new Set([
+      ...redactKeys,
+      ...redactKeys.map((k) => k.toLowerCase()),
+    ]);
+
+    this._baseMetadata = sanitizeMetadata(
+      options.metadata,
+      this._metadataAllowlist,
+      this._redactMetadataKeys,
+    );
   }
 
   /**
@@ -375,7 +498,11 @@ export class DripCallbackHandler {
       status: 'COMPLETED',
       externalRunId: options.externalRunId,
       correlationId: options.correlationId,
-      metadata: { ...this._baseMetadata, ...(options.metadata ?? {}) },
+      metadata: sanitizeMetadata(
+        { ...this._baseMetadata, ...(options.metadata ?? {}), integration: 'langchain' },
+        this._metadataAllowlist,
+        this._redactMetadataKeys,
+      ),
     });
     this._currentRunId = result.run.id;
     return this._currentRunId;
@@ -450,7 +577,11 @@ export class DripCallbackHandler {
       description: params.description,
       costUnits: params.costUnits,
       idempotencyKey,
-      metadata: { ...this._baseMetadata, ...(params.metadata ?? {}) },
+      metadata: sanitizeMetadata(
+        { ...this._baseMetadata, ...(params.metadata ?? {}), integration: 'langchain' },
+        this._metadataAllowlist,
+        this._redactMetadataKeys,
+      ),
     });
   }
 
@@ -476,7 +607,7 @@ export class DripCallbackHandler {
       runId,
       model: modelName,
       startTime: Date.now(),
-      prompts,
+      promptCount: prompts.length,
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
@@ -521,8 +652,9 @@ export class DripCallbackHandler {
         model: state.model,
         inputTokens,
         outputTokens,
+        totalTokens,
         latencyMs,
-        promptCount: state.prompts.length,
+        promptCount: state.promptCount,
       },
       idempotencySuffix: runId,
     });
@@ -553,7 +685,7 @@ export class DripCallbackHandler {
         metadata: {
           model: state.model,
           errorType: error.name,
-          errorMessage: error.message,
+          errorHash: hashText(error.message),
           latencyMs,
         },
         idempotencySuffix: runId,
@@ -592,14 +724,11 @@ export class DripCallbackHandler {
   ): void {
     const modelName = serialized.name ?? serialized.id?.at(-1) ?? 'unknown';
 
-    // Convert messages to string representation for tracking
-    const prompts = messages.map((msgList) => JSON.stringify(msgList));
-
     this._llmCalls.set(runId, {
       runId,
       model: modelName,
       startTime: Date.now(),
-      prompts,
+      promptCount: messages.length,
       inputTokens: 0,
       outputTokens: 0,
       totalTokens: 0,
@@ -628,8 +757,8 @@ export class DripCallbackHandler {
       runId,
       toolName,
       startTime: Date.now(),
-      inputStr: inputStr.slice(0, 1000), // Truncate long inputs
-      outputStr: '',
+      inputHash: hashText(inputStr),
+      inputLength: inputStr.length,
       error: null,
     });
   }
@@ -659,8 +788,9 @@ export class DripCallbackHandler {
       metadata: {
         toolName: state.toolName,
         latencyMs,
-        inputPreview: state.inputStr.slice(0, 200),
-        outputPreview: String(output).slice(0, 200),
+        inputHash: state.inputHash,
+        inputLength: state.inputLength,
+        outputLength: String(output).length,
       },
       idempotencySuffix: runId,
     });
@@ -691,7 +821,7 @@ export class DripCallbackHandler {
         metadata: {
           toolName: state.toolName,
           errorType: error.name,
-          errorMessage: error.message,
+          errorHash: hashText(error.message),
           latencyMs,
         },
         idempotencySuffix: runId,
@@ -720,8 +850,7 @@ export class DripCallbackHandler {
       runId,
       chainType,
       startTime: Date.now(),
-      inputs,
-      outputs: {},
+      inputKeyCount: Object.keys(inputs).length,
       error: null,
     });
   }
@@ -751,8 +880,8 @@ export class DripCallbackHandler {
       metadata: {
         chainType: state.chainType,
         latencyMs,
-        inputKeys: Object.keys(state.inputs),
-        outputKeys: Object.keys(outputs),
+        inputKeyCount: state.inputKeyCount,
+        outputKeyCount: Object.keys(outputs).length,
       },
       idempotencySuffix: runId,
     });
@@ -783,7 +912,7 @@ export class DripCallbackHandler {
         metadata: {
           chainType: state.chainType,
           errorType: error.name,
-          errorMessage: error.message,
+          errorHash: hashText(error.message),
           latencyMs,
         },
         idempotencySuffix: runId,
@@ -809,22 +938,13 @@ export class DripCallbackHandler {
       state = {
         runId,
         startTime: Date.now(),
-        actions: [],
-        finalOutput: null,
+        actionCount: 0,
         error: null,
       };
       this._agentCalls.set(runId, state);
     }
 
-    const toolInput = typeof action.toolInput === 'string'
-      ? action.toolInput
-      : JSON.stringify(action.toolInput);
-
-    state.actions.push({
-      tool: action.tool,
-      toolInput: toolInput.slice(0, 500),
-      log: action.log?.slice(0, 500) ?? null,
-    });
+    state.actionCount += 1;
 
     // Emit action event
     await this._emitEvent({
@@ -834,9 +954,9 @@ export class DripCallbackHandler {
       description: `Agent action: ${action.tool}`,
       metadata: {
         tool: action.tool,
-        actionCount: state.actions.length,
+        actionCount: state.actionCount,
       },
-      idempotencySuffix: `${runId}:${state.actions.length}`,
+      idempotencySuffix: `${runId}:${state.actionCount}`,
     });
   }
 
@@ -856,7 +976,7 @@ export class DripCallbackHandler {
 
     if (state) {
       latencyMs = Date.now() - state.startTime;
-      actionCount = state.actions.length;
+      actionCount = state.actionCount;
     }
 
     await this._emitEvent({
@@ -867,7 +987,7 @@ export class DripCallbackHandler {
       metadata: {
         latencyMs,
         actionCount,
-        outputPreview: JSON.stringify(finish.returnValues).slice(0, 500),
+        outputLength: JSON.stringify(finish.returnValues).length,
       },
       idempotencySuffix: runId,
     });
@@ -895,8 +1015,8 @@ export class DripCallbackHandler {
       runId,
       toolName: `retriever:${retrieverName}`,
       startTime: Date.now(),
-      inputStr: query.slice(0, 1000),
-      outputStr: '',
+      inputHash: hashText(query),
+      inputLength: query.length,
       error: null,
     });
   }
@@ -925,7 +1045,8 @@ export class DripCallbackHandler {
       description: `Retriever: ${state.toolName}`,
       metadata: {
         retriever: state.toolName,
-        queryPreview: state.inputStr.slice(0, 200),
+        queryHash: state.inputHash,
+        queryLength: state.inputLength,
         documentCount: documents.length,
         latencyMs,
       },
@@ -958,7 +1079,7 @@ export class DripCallbackHandler {
         metadata: {
           retriever: state.toolName,
           errorType: error.name,
-          errorMessage: error.message,
+          errorHash: hashText(error.message),
           latencyMs,
         },
         idempotencySuffix: runId,

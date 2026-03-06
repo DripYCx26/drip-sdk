@@ -12,6 +12,7 @@
  */
 
 import { deterministicIdempotencyKey } from './idempotency.js';
+export { DripError } from './errors.js';
 
 // ============================================================================
 // Configuration Types
@@ -41,7 +42,7 @@ export interface DripConfig {
   /**
    * Base URL for the Drip API. Defaults to production API.
    * Falls back to `DRIP_BASE_URL` environment variable if not provided.
-   * @default "https://drip-app-hlunj.ondigitalocean.app/v1"
+   * @default "https://api.drippay.dev/v1"
    */
   baseUrl?: string;
 
@@ -522,6 +523,86 @@ export interface RunDetails {
 }
 
 // ============================================================================
+// Entitlement Types
+// ============================================================================
+
+// ============================================================================
+// Customer Spending Cap Types
+// ============================================================================
+
+/** Cap types for per-customer spending limits */
+export type SpendingCapType = 'DAILY_CHARGE_LIMIT' | 'MONTHLY_CHARGE_LIMIT' | 'SINGLE_CHARGE_LIMIT';
+
+/** Parameters for setting a per-customer spending cap. */
+export interface SetSpendingCapParams {
+  /** Cap type: daily, monthly, or single-charge limit */
+  capType: SpendingCapType;
+  /** Spending limit in USDC */
+  limitValue: number;
+  /** Auto-block charges when cap is reached (default: true) */
+  autoBlock?: boolean;
+}
+
+/** A per-customer spending cap with current usage tracking. */
+export interface CustomerSpendingCap {
+  id: string;
+  capType: string;
+  limitValue: string;
+  currentUsage: string;
+  periodStart: string;
+  isActive: boolean;
+  autoBlock: boolean;
+  lastAlertLevel: string | null;
+}
+
+// ============================================================================
+// Entitlement Types
+// ============================================================================
+
+/**
+ * Parameters for checking a customer's entitlement to use a feature.
+ */
+export interface CheckEntitlementParams {
+  /** The Drip customer ID */
+  customerId: string;
+
+  /** Feature key to check (e.g., "search", "api_calls", "tokens") */
+  featureKey: string;
+
+  /** Quantity to check against the limit (default: 1) */
+  quantity?: number;
+}
+
+/**
+ * Result of an entitlement check.
+ */
+export interface EntitlementCheckResult {
+  /** Whether the customer is allowed to use this feature */
+  allowed: boolean;
+
+  /** The feature that was checked */
+  featureKey: string;
+
+  /** Remaining quota in the current period (-1 if unlimited) */
+  remaining: number;
+
+  /** The limit for this period (-1 if unlimited) */
+  limit: number;
+
+  /** Whether the customer has unlimited access */
+  unlimited: boolean;
+
+  /** The period this limit applies to */
+  period: 'DAILY' | 'MONTHLY';
+
+  /** When the current period resets (ISO timestamp) */
+  periodResetsAt: string;
+
+  /** Reason for denial (only present when allowed=false) */
+  reason?: string;
+}
+
+// ============================================================================
 // Internal Types (used by recordRun)
 // ============================================================================
 
@@ -547,20 +628,7 @@ interface CreateWorkflowParams {
 // Error Types
 // ============================================================================
 
-/**
- * Error thrown by Drip SDK operations.
- */
-export class DripError extends Error {
-  constructor(
-    message: string,
-    public statusCode: number,
-    public code?: string,
-  ) {
-    super(message);
-    this.name = 'DripError';
-    Object.setPrototypeOf(this, DripError.prototype);
-  }
-}
+import { DripError } from './errors.js';
 
 // ============================================================================
 // Core SDK Class
@@ -646,7 +714,7 @@ export class Drip {
   constructor(config: DripConfig = {}) {
     // Read from config or fall back to environment variables
     const apiKey = config.apiKey ?? (typeof process !== 'undefined' ? process.env.DRIP_API_KEY : undefined);
-    const baseUrl = config.baseUrl ?? (typeof process !== 'undefined' ? process.env.DRIP_BASE_URL : undefined);
+    const baseUrl = config.baseUrl ?? (typeof process !== 'undefined' ? (process.env.DRIP_API_URL ?? process.env.DRIP_BASE_URL) : undefined);
 
     if (!apiKey) {
       throw new Error(
@@ -655,7 +723,7 @@ export class Drip {
     }
 
     this.apiKey = apiKey;
-    this.baseUrl = baseUrl || 'https://drip-app-hlunj.ondigitalocean.app/v1';
+    this.baseUrl = baseUrl || 'https://api.drippay.dev/v1';
     this.timeout = config.timeout || 30000;
 
     // Detect key type from prefix
@@ -868,6 +936,67 @@ export class Drip {
     const path = query ? `/customers?${query}` : '/customers';
 
     return this.request<ListCustomersResponse>(path);
+  }
+
+  // ==========================================================================
+  // Customer Spending Caps
+  // ==========================================================================
+
+  /**
+   * Sets a per-customer spending cap.
+   *
+   * Multi-level alerts fire at 50%, 80%, 95%, 100% via webhooks.
+   *
+   * @param customerId - The Drip customer ID
+   * @param params - Cap parameters (capType, limitValue, autoBlock)
+   * @returns The created/updated spending cap
+   *
+   * @example
+   * ```typescript
+   * const cap = await drip.setCustomerSpendingCap('cust_abc123', {
+   *   capType: 'MONTHLY_CHARGE_LIMIT',
+   *   limitValue: 500,
+   * });
+   * ```
+   */
+  async setCustomerSpendingCap(
+    customerId: string,
+    params: SetSpendingCapParams,
+  ): Promise<CustomerSpendingCap> {
+    return this.request<CustomerSpendingCap>(
+      `/customers/${customerId}/spending-cap`,
+      { method: 'PUT', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Lists all active spending caps for a customer.
+   *
+   * @param customerId - The Drip customer ID
+   * @returns List of active spending caps with current usage
+   */
+  async getCustomerSpendingCaps(
+    customerId: string,
+  ): Promise<{ caps: CustomerSpendingCap[] }> {
+    return this.request<{ caps: CustomerSpendingCap[] }>(
+      `/customers/${customerId}/spending-caps`,
+    );
+  }
+
+  /**
+   * Removes a spending cap for a customer.
+   *
+   * @param customerId - The Drip customer ID
+   * @param capId - The spending cap ID to remove
+   */
+  async removeCustomerSpendingCap(
+    customerId: string,
+    capId: string,
+  ): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(
+      `/customers/${customerId}/spending-caps/${capId}`,
+      { method: 'DELETE' },
+    );
   }
 
   // ==========================================================================
@@ -1228,6 +1357,49 @@ export class Drip {
       totalCostUnits: endResult.totalCostUnits ?? null,
       summary: `${statusIcon} ${workflowName}: ${eventsCreated} events recorded (${endResult.durationMs ?? durationMs}ms)`,
     };
+  }
+
+  // ==========================================================================
+  // Entitlement Methods
+  // ==========================================================================
+
+  /**
+   * Checks if a customer is entitled to use a feature.
+   *
+   * Use this before processing expensive requests to avoid wasting compute
+   * on customers who are over their quota.
+   *
+   * @param params - Entitlement check parameters
+   * @returns Whether the customer is allowed, with remaining quota info
+   *
+   * @example
+   * ```typescript
+   * const result = await drip.checkEntitlement({
+   *   customerId: 'cust_abc123',
+   *   featureKey: 'search',
+   *   quantity: 1,
+   * });
+   *
+   * if (!result.allowed) {
+   *   return res.status(429).json({
+   *     error: 'Quota exceeded',
+   *     remaining: result.remaining,
+   *     resetsAt: result.periodResetsAt,
+   *   });
+   * }
+   *
+   * // Process the request...
+   * ```
+   */
+  async checkEntitlement(params: CheckEntitlementParams): Promise<EntitlementCheckResult> {
+    return this.request<EntitlementCheckResult>('/entitlements/check', {
+      method: 'POST',
+      body: JSON.stringify({
+        customerId: params.customerId,
+        featureKey: params.featureKey,
+        quantity: params.quantity ?? 1,
+      }),
+    });
   }
 }
 

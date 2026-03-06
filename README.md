@@ -49,13 +49,13 @@ The `drip` singleton reads `DRIP_API_KEY` from your environment automatically.
 import { Drip } from '@drip-sdk/node';
 
 // Auto-reads DRIP_API_KEY from environment
-const drip = new Drip();
+const client = new Drip();
 
 // Or pass config explicitly with a secret key (full access)
-const drip = new Drip({ apiKey: 'sk_test_...' });
+const client = new Drip({ apiKey: 'sk_test_...' });
 
 // Or with a public key (safe for client-side, limited scope)
-const drip = new Drip({ apiKey: 'pk_test_...' });
+const client = new Drip({ apiKey: 'pk_test_...' });
 ```
 
 ### Full Example
@@ -123,13 +123,15 @@ Drip is append-only and idempotent-friendly. You can safely retry events.
 
 ## Idempotency Keys
 
-Every mutating SDK method (`charge`, `trackUsage`, `emitEvent`) accepts an optional `idempotencyKey` parameter. The server uses this key to deduplicate requests — if two requests share the same key, only the first is processed.
+Every mutating SDK method (`trackUsage`, `emitEvent`) requires an `idempotencyKey`. The server uses this key to deduplicate requests — if two requests share the same key, only the first is processed. The parameter is optional in the SDK method signature because **the SDK always generates one for you if you don't provide it**.
+
+> **Full SDK**: `charge()` also accepts `idempotencyKey` but is only available in the Full SDK (`import { Drip } from '@drip-sdk/node'`), not the Core SDK.
 
 `recordRun` generates idempotency keys internally for its batch events (using `externalRunId` when provided, otherwise deterministic keys).
 
 ### Auto-generated keys (default)
 
-When you omit `idempotencyKey`, the SDK generates one automatically. The auto key is:
+When you omit `idempotencyKey`, the SDK generates one automatically — this works for both the Core SDK and Full SDK. The auto key is:
 
 - **Unique per call** — two separate calls with identical parameters produce different keys (a monotonic counter ensures this).
 - **Stable across retries** — the key is generated once and reused for all retry attempts of that call, so network retries are safely deduplicated.
@@ -212,20 +214,39 @@ await drip.createWebhook({ url: '...', events: ['charge.succeeded'] });
 
 ## Core SDK Methods
 
+Available via `import { drip } from '@drip-sdk/node/core'` (tracking + runs only, no billing):
+
 | Method | Description |
 |--------|-------------|
 | `ping()` | Verify API connection |
 | `createCustomer(params)` | Create a customer |
 | `getCustomer(customerId)` | Get customer details |
 | `listCustomers(options)` | List all customers |
-| `trackUsage(params)` | Record metered usage |
+| `trackUsage(params)` | Record metered usage (non-billing, hits `/usage/internal`) |
 | `recordRun(params)` | Log complete agent run (simplified) |
-| `startRun(params)` | Start execution trace |
+| `startRun(params)` | Start execution trace (requires `workflowId` — use `recordRun` for simpler flow) |
 | `emitEvent(params)` | Log event within run |
 | `emitEventsBatch(params)` | Batch log events |
 | `endRun(runId, params)` | Complete execution trace |
 | `getRun(runId)` | Get run details and summary |
 | `getRunTimeline(runId)` | Get execution timeline |
+| `checkEntitlement(params)` | Pre-request authorization check |
+
+### Additional methods on the Full SDK (`import { Drip } from '@drip-sdk/node'`)
+
+| Method | Description |
+|--------|-------------|
+| `getOrCreateCustomer(externalCustomerId, metadata?)` | Idempotently create or retrieve a customer by external ID |
+| `charge(params)` | Create a billable charge directly (requires pricing plan) |
+| `chargeAsync(params)` | Async charge — returns 202 immediately, processes in background |
+| `listCharges(options?)` | List charges for your business |
+| `getCharge(chargeId)` | Get a single charge by ID |
+| `getBalance(customerId)` | Get customer balance |
+| `listEvents(options?)` | List execution events with filters |
+| `getEvent(eventId)` | Get a single event by ID |
+| `getEventTrace(eventId)` | Get event causality trace (ancestors, children, retries) |
+| `wrapApiCall(params)` | Wrap external API call with guaranteed usage recording |
+| `checkout(params)` | Create hosted checkout session for top-ups |
 
 ### Creating Customers
 
@@ -236,13 +257,13 @@ All parameters are optional, but at least one of `externalCustomerId` or `onchai
 const customer = await drip.createCustomer({ externalCustomerId: 'user_123' });
 
 // With an on-chain address (for on-chain billing)
-const customer = await drip.createCustomer({
+const withAddress = await drip.createCustomer({
   onchainAddress: '0x1234...',
   externalCustomerId: 'user_123',
 });
 
 // Internal/non-billing customer (for tracking only)
-const customer = await drip.createCustomer({
+const internal = await drip.createCustomer({
   externalCustomerId: 'internal-team',
   isInternal: true,
 });
@@ -268,15 +289,99 @@ const customer = await drip.createCustomer({
 
 ---
 
-## Full SDK (Billing, Webhooks, Integrations)
+## Full SDK (Billing, Entitlements, Webhooks, Subscriptions, Invoices)
 
-For billing, webhooks, middleware, and advanced features:
+For billing, entitlements, subscriptions, invoices, contracts, webhooks, middleware, and advanced features:
 
 ```typescript
 import { Drip } from '@drip-sdk/node';
+
+const drip = new Drip({ apiKey: 'sk_live_...' });
+
+// Charge a customer for usage
+const result = await drip.charge({
+  customerId: customer.id,
+  meter: 'api_calls',
+  quantity: 100,
+});
+console.log(`Charged ${result.charge.amountUsdc} USDC`);
+
+// Check if a customer can use a feature before processing
+const check = await drip.checkEntitlement({
+  customerId: customer.id,
+  featureKey: 'search',
+});
+
+if (!check.allowed) {
+  // Over quota — return 429 without wasting compute
+}
 ```
 
+Key methods:
+
+| Method | Description |
+|--------|-------------|
+| `getBalance(customerId)` | Get customer balance (USDC, pending, available) |
+| `checkEntitlement(params)` | Pre-request authorization check (allowed/denied + remaining quota) |
+| `setCustomerSpendingCap(customerId, params)` | Set daily/monthly/single-charge spending cap |
+| `getCustomerSpendingCaps(customerId)` | List active spending caps |
+| `removeCustomerSpendingCap(customerId, capId)` | Remove a spending cap |
+| `checkout(params)` | Create hosted checkout session for top-ups |
+
+Highlights:
+- **Billing** — `charge()`, `listCharges()`, `getCharge()`, `getBalance()`
+- **Cost Estimation** — `estimateFromUsage()`, `estimateFromHypothetical()` for budget planning
+- **Spending Caps** — per-customer daily/monthly limits with multi-level alerts at 50%, 80%, 95%, 100%
+- **Entitlements** — pre-request quota gating with `checkEntitlement()`
+- **Subscription billing** — create, update, pause, resume, cancel
+- **Invoices** — available via REST API (SDK methods planned)
+- **Contracts** — available via REST API (SDK methods planned)
+- **Webhooks** — create, verify, manage webhook endpoints
+- **Middleware** — Next.js and Express integrations
+
 See **[FULL_SDK.md](./FULL_SDK.md)** for complete documentation.
+
+---
+
+## Customer Portal
+
+Give your customers a read-only dashboard showing their balance, charges, session keys, and settlements — no wallet connection needed.
+
+**How it works:** You create a short-lived portal session. You get back a URL. Send it to your customer (email, in-app link, etc.). They open it and see their data. The link expires automatically.
+
+```typescript
+import { Drip } from '@drip-sdk/node';
+
+const drip = new Drip({ apiKey: 'sk_live_...' }); // requires secret key
+
+// 1. Create a portal link (default: expires in 60 minutes)
+const session = await drip.createPortalSession({
+  customerId: 'cust_abc123',
+  expiresInMinutes: 120, // optional, 5–1440 (24h max)
+});
+
+// 2. Send the URL to your customer
+const portalUrl = `https://app.drippay.dev${session.url}`;
+// → "https://app.drippay.dev/portal/abc..."
+
+// 3. Revoke early if needed (optional)
+await drip.revokePortalSession(session.id);
+```
+
+| Method | Description |
+|--------|-------------|
+| `createPortalSession(params)` | Create a portal link for a customer |
+| `revokePortalSession(sessionId)` | Revoke a portal link immediately |
+
+**What the customer sees:**
+- Account info (address, status)
+- Balance, pending charges, total spent
+- Recent transactions
+- Session keys (read-only)
+- Charge + usage event history
+- Settlement history with on-chain tx links
+
+Both methods require a secret key (`sk_`). Portal tokens are read-only — customers can view but not modify anything.
 
 ---
 
@@ -298,10 +403,10 @@ try {
 
 ## Requirements
 
-- Node.js 18.0.0 or higher
+- Node.js 18.0.0 or higher (SDK supports Node 18+; the Drip monorepo uses Node 24.x)
 
 ## Links
 
 - [Full SDK Documentation](./FULL_SDK.md)
-- [API Documentation](https://drippay.dev/api-reference)
+- [API Documentation](https://docs.drippay.dev/api-reference)
 - [npm](https://www.npmjs.com/package/@drip-sdk/node)

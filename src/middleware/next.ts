@@ -162,7 +162,7 @@ function paymentRequiredResponse(
       instructions: {
         step1: 'Sign the payment request with your session key using EIP-712',
         step2: 'Retry the request with X-Payment-* headers',
-        documentation: 'https://docs.drip.dev/x402',
+        documentation: 'https://docs.drippay.dev/x402',
       },
     }),
     {
@@ -253,6 +253,8 @@ export function withDrip(
       customerResolver: resolvedCustomerResolver,
       idempotencyKey: resolvedIdempotencyKey,
       metadata: resolvedMetadata,
+      metadataAllowlist: config.metadataAllowlist,
+      redactMetadataKeys: config.redactMetadataKeys,
       skipInDevelopment: config.skipInDevelopment,
       // Clear callbacks that need the original request type
       onCharge: undefined,

@@ -24,6 +24,29 @@ import { DripMiddlewareError } from './types.js';
 
 const DEFAULT_PAYMENT_EXPIRY_SEC = 5 * 60; // 5 minutes
 const MAX_TIMESTAMP_AGE_SEC = 5 * 60; // 5 minutes max age for payment proof timestamps
+const DEFAULT_METADATA_MAX_STRING_LENGTH = 256;
+
+const SENSITIVE_METADATA_KEY_PATTERN =
+  /(authorization|api[_-]?key|secret|password|token|prompt|completion|output|input|request|response|body|cookie|set-cookie|email|phone|ssn|address|creditcard|card)/i;
+
+const DEFAULT_REDACT_METADATA_KEYS = [
+  'authorization',
+  'apiKey',
+  'api_key',
+  'secret',
+  'password',
+  'token',
+  'prompt',
+  'prompts',
+  'input',
+  'inputs',
+  'output',
+  'outputs',
+  'request',
+  'response',
+  'body',
+  'query',
+] as const;
 
 // Required headers for x402 payment proof
 const REQUIRED_PAYMENT_HEADERS = [
@@ -223,6 +246,60 @@ function hashString(input: string): string {
   return `0x${hash}`;
 }
 
+function isMetadataPrimitive(value: unknown): value is string | number | boolean | null {
+  if (value === null) {
+    return true;
+  }
+  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
+}
+
+function sanitizeChargeMetadata<TRequest>(
+  metadata: Record<string, unknown> | undefined,
+  config: Pick<WithDripConfig<TRequest>, 'metadataAllowlist' | 'redactMetadataKeys'>,
+): Record<string, unknown> {
+  if (!metadata) {
+    return {};
+  }
+
+  const allowlist = config.metadataAllowlist
+    ? new Set([...config.metadataAllowlist, ...config.metadataAllowlist.map((k) => k.toLowerCase())])
+    : null;
+
+  const redactKeys = config.redactMetadataKeys
+    ? new Set([...config.redactMetadataKeys, ...config.redactMetadataKeys.map((k) => k.toLowerCase())])
+    : new Set([...DEFAULT_REDACT_METADATA_KEYS, ...DEFAULT_REDACT_METADATA_KEYS.map((k) => k.toLowerCase())]);
+
+  const sanitized: Record<string, unknown> = {};
+
+  for (const [key, value] of Object.entries(metadata)) {
+    const normalizedKey = key.toLowerCase();
+
+    if (allowlist && !allowlist.has(key) && !allowlist.has(normalizedKey)) {
+      continue;
+    }
+    if (redactKeys.has(key) || redactKeys.has(normalizedKey)) {
+      continue;
+    }
+    if (SENSITIVE_METADATA_KEY_PATTERN.test(key)) {
+      continue;
+    }
+    if (!isMetadataPrimitive(value)) {
+      continue;
+    }
+    if (typeof value === 'number' && !Number.isFinite(value)) {
+      continue;
+    }
+    if (typeof value === 'string' && value.length > DEFAULT_METADATA_MAX_STRING_LENGTH) {
+      sanitized[key] = value.slice(0, DEFAULT_METADATA_MAX_STRING_LENGTH);
+      continue;
+    }
+
+    sanitized[key] = value;
+  }
+
+  return sanitized;
+}
+
 // ============================================================================
 // Customer Resolution
 // ============================================================================
@@ -304,10 +381,14 @@ export async function generateIdempotencyKey<TRequest extends GenericRequest>(
     return config.idempotencyKey(request);
   }
 
-  // Default: hash of method + url + customer + timestamp (millisecond precision)
-  // Using milliseconds ensures each request gets a unique key by default
-  const timestamp = Date.now();
-  const components = [request.method, request.url, customerId, timestamp];
+  // Default: hash of method + url + customer + body content.
+  // CRIT-09: No Date.now() — timestamps break idempotency on retry.
+  // The body hash ensures identical requests produce the same key,
+  // while different payloads produce different keys.
+  const bodyStr = typeof request.body === 'string'
+    ? request.body
+    : (request.body ? JSON.stringify(request.body) : '');
+  const components = [request.method, request.url, customerId, bodyStr];
   return `drip_${hashString(components.join('|')).slice(2, 18)}`;
 }
 
@@ -434,9 +515,10 @@ export async function processRequest<TRequest extends GenericRequest>(
     };
 
     // Resolve metadata
-    const metadata = typeof config.metadata === 'function'
+    const rawMetadata = typeof config.metadata === 'function'
       ? config.metadata(request)
       : config.metadata;
+    const metadata = sanitizeChargeMetadata(rawMetadata, config);
 
     // Attempt to charge
     try {

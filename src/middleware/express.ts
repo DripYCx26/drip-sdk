@@ -149,7 +149,7 @@ function sendPaymentRequired(
     instructions: {
       step1: 'Sign the payment request with your session key using EIP-712',
       step2: 'Retry the request with X-Payment-* headers',
-      documentation: 'https://docs.drip.dev/x402',
+      documentation: 'https://docs.drippay.dev/x402',
     },
   });
 }
@@ -253,6 +253,8 @@ export function dripMiddleware(config: ExpressDripConfig): ExpressMiddleware {
       customerResolver: resolvedCustomerResolver,
       idempotencyKey: resolvedIdempotencyKey,
       metadata: resolvedMetadata,
+      metadataAllowlist: config.metadataAllowlist,
+      redactMetadataKeys: config.redactMetadataKeys,
       skipInDevelopment: config.skipInDevelopment,
       // Clear callbacks that need the original request type
       onCharge: undefined,
@@ -350,11 +352,18 @@ export function createDripMiddleware(
 }
 
 /**
- * Check if an Express request has x402 payment proof headers.
+ * Check if an Express request (or raw Headers object) has x402 payment proof headers.
  * Useful for conditional logic in routes.
  */
-export function hasPaymentProofHeaders(req: ExpressRequest): boolean {
-  return hasPaymentProof(normalizeHeaders(req.headers));
+export function hasPaymentProofHeaders(reqOrHeaders: ExpressRequest | Headers): boolean {
+  if (reqOrHeaders instanceof Headers) {
+    const normalized: Record<string, string | undefined> = {};
+    reqOrHeaders.forEach((value, key) => {
+      normalized[key.toLowerCase()] = value;
+    });
+    return hasPaymentProof(normalized);
+  }
+  return hasPaymentProof(normalizeHeaders(reqOrHeaders.headers));
 }
 
 /**

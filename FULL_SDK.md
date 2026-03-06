@@ -11,6 +11,8 @@ This document covers billing, webhooks, and advanced features. For usage trackin
 - [Quick Start](#quick-start)
 - [Use Cases](#use-cases)
 - [API Reference](#api-reference)
+- [Subscription Billing](#subscription-billing)
+- [Entitlements](#entitlements-pre-request-authorization)
 - [Streaming Meter](#streaming-meter-llm-token-streaming)
 - [Framework Middleware](#framework-middleware)
 - [LangChain Integration](#langchain-integration)
@@ -48,6 +50,7 @@ Understanding `trackUsage` vs `charge`:
 |--------|--------------|
 | `trackUsage()` | Logs usage to the ledger (no billing) |
 | `charge()` | Converts usage into a billable charge |
+| `createSubscription()` | Creates a recurring subscription (auto-charges on interval) |
 
 **Typical flow:**
 
@@ -109,7 +112,7 @@ const runId = 'run_abc123';
 const timeline = await drip.getRunTimeline(runId);
 
 for (const event of timeline.events) {
-  console.log(`${event.eventType}: ${event.duration}ms`);
+  console.log(`${event.eventType}: ${event.durationMs}ms`);
 }
 ```
 
@@ -234,12 +237,12 @@ await drip.emitEvent({
 | Method | Description |
 |--------|-------------|
 | `trackUsage(params)` | Log usage to ledger (no billing) |
-| `charge(params)` | Create a billable charge |
+| `charge(params)` | Create a billable charge (sync — waits for settlement) |
+| `chargeAsync(params)` | Create a billable charge (async — returns 202, processes in background) |
 | `wrapApiCall(params)` | Wrap external API call with guaranteed usage recording |
 | `getBalance(customerId)` | Get balance and usage summary |
 | `getCharge(chargeId)` | Get charge details |
 | `listCharges(options)` | List all charges |
-| `getChargeStatus(chargeId)` | Get charge status |
 
 ### Execution Logging
 
@@ -252,6 +255,9 @@ await drip.emitEvent({
 | `endRun(runId, params)` | Complete execution trace |
 | `getRun(runId)` | Get run details |
 | `getRunTimeline(runId)` | Get execution timeline |
+| `listEvents(options?)` | List execution events with filters (customerId, runId, eventType, outcome) |
+| `getEvent(eventId)` | Get full event details |
+| `getEventTrace(eventId)` | Get causality trace (ancestors, children, retry chain) |
 | `createWorkflow(params)` | Create a workflow |
 | `listWorkflows()` | List all workflows |
 
@@ -259,7 +265,8 @@ await drip.emitEvent({
 
 | Method | Description |
 |--------|-------------|
-| `createCustomer(params)` | Create a customer |
+| `createCustomer(params)` | Create a customer (auto-provisions smart account on testnet) |
+| `getOrCreateCustomer(externalCustomerId, metadata?)` | Idempotently create or retrieve a customer by external ID |
 | `getCustomer(customerId)` | Get customer details |
 | `listCustomers(options)` | List all customers |
 
@@ -270,12 +277,19 @@ All webhook management methods require a **secret key (`sk_`)**. Using a public 
 | Method | Description |
 |--------|-------------|
 | `createWebhook(params)` | Create webhook endpoint |
+| `updateWebhook(webhookId, params)` | Update a webhook (URL, events, filters, active status) |
 | `listWebhooks()` | List all webhooks |
 | `getWebhook(webhookId)` | Get webhook details |
 | `deleteWebhook(webhookId)` | Delete a webhook |
-| `testWebhook(webhookId)` | Test a webhook |
-| `rotateWebhookSecret(webhookId)` | Rotate webhook secret |
+| `testWebhook(webhookId)` | Send a test event to a webhook |
+| `rotateWebhookSecret(webhookId)` | Rotate webhook signing secret |
 | `Drip.verifyWebhookSignature()` | Verify webhook signature (static, no key needed) |
+
+### Entitlements
+
+| Method | Description |
+|--------|-------------|
+| `checkEntitlement(params)` | Pre-request authorization check (is customer allowed?) |
 
 ### Cost Estimation
 
@@ -284,6 +298,91 @@ All webhook management methods require a **secret key (`sk_`)**. Using a public 
 | `estimateFromUsage(params)` | Estimate cost from usage data |
 | `estimateFromHypothetical(params)` | Estimate from hypothetical usage |
 
+### Resilience & Observability
+
+These methods require `resilience: true` in the constructor. They are synchronous (not async).
+
+| Method | Description |
+|--------|-------------|
+| `getMetrics()` | Get SDK metrics (success rate, P95 latency, error counts) |
+| `getHealth()` | Get health status (circuit breaker state, rate limiter) |
+
+```typescript
+const drip = new Drip({ apiKey: 'sk_test_...', resilience: true });
+
+// After making some requests...
+const metrics = drip.getMetrics();
+if (metrics) {
+  console.log(`Success rate: ${metrics.successRate.toFixed(1)}%`);
+  console.log(`P95 latency: ${metrics.p95LatencyMs.toFixed(0)}ms`);
+}
+
+const health = drip.getHealth();
+if (health) {
+  console.log(`Circuit: ${health.circuitBreaker.state}`);
+  console.log(`Available tokens: ${health.rateLimiter.availableTokens}`);
+}
+```
+
+### Subscriptions (Secret Key Only)
+
+| Method | Description |
+|--------|-------------|
+| `createSubscription(params)` | Create a recurring subscription |
+| `getSubscription(subscriptionId)` | Get subscription details |
+| `listSubscriptions(options)` | List subscriptions (filter by customer/status) |
+| `updateSubscription(subscriptionId, params)` | Update subscription (name, amount, metadata) |
+| `cancelSubscription(subscriptionId, params?)` | Cancel a subscription (default: end of period; `{ immediate: true }` for immediate) |
+| `pauseSubscription(subscriptionId, params?)` | Pause a subscription (optional `resumeDate`) |
+| `resumeSubscription(subscriptionId)` | Resume a paused subscription |
+
+### Invoices (REST API Only)
+
+Invoice management is available via the REST API. SDK methods are planned for a future release.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/invoices/generate` | Generate invoice from charges |
+| POST | `/v1/invoices/generate-from-subscription` | Generate from subscription |
+| GET | `/v1/invoices` | List invoices |
+| GET | `/v1/invoices/:id` | Get invoice details |
+| POST | `/v1/invoices/:id/issue` | Finalize (DRAFT → PENDING) |
+| POST | `/v1/invoices/:id/paid` | Mark as paid |
+| POST | `/v1/invoices/:id/void` | Void an invoice |
+| GET | `/v1/invoices/summary` | Aggregated statistics |
+| GET | `/v1/invoices/:id/pdf` | Download PDF |
+
+### Contracts (REST API Only)
+
+Contract management is available via the REST API. SDK methods are planned for a future release.
+
+| Method | Path | Description |
+|--------|------|-------------|
+| POST | `/v1/contracts` | Create a contract |
+| GET | `/v1/contracts` | List contracts |
+| GET | `/v1/contracts/:id` | Get contract details |
+| PATCH | `/v1/contracts/:id` | Update a contract |
+| DELETE | `/v1/contracts/:id` | Delete a contract |
+| POST | `/v1/contracts/:id/overrides` | Add pricing override |
+| DELETE | `/v1/contracts/:id/overrides/:unitType` | Remove pricing override |
+
+### API Keys, Pricing Plans & Usage Caps (REST API Only)
+
+These administrative endpoints are available via the REST API with a secret key (`sk_`). SDK methods are planned for a future release.
+
+| Endpoint | Description |
+|--------|-------------|
+| `POST /v1/api-keys` | Create a new API key pair (returns pk\_ + sk\_) |
+| `GET /v1/api-keys` | List API keys for your business |
+| `POST /v1/api-keys/:id/rotate` | Rotate an API key (old key expires after 24h grace period) |
+| `POST /v1/api-keys/:id/revoke` | Revoke an API key immediately |
+| `POST /v1/pricing-plans` | Create a pricing plan (unit type + price per unit) |
+| `GET /v1/pricing-plans` | List pricing plans |
+| `POST /v1/usage-caps` | Create a usage cap (daily/monthly charge or request limit) |
+| `GET /v1/usage-caps` | List usage caps |
+| `PATCH /v1/usage-caps/:id` | Update a usage cap (limit value, alert threshold, active status) |
+| `GET /v1/usage-caps/types` | List available cap types |
+
 ### Other
 
 | Method | Description |
@@ -291,6 +390,132 @@ All webhook management methods require a **secret key (`sk_`)**. Using a public 
 | `checkout(params)` | Create checkout session (fiat on-ramp) |
 | `listMeters()` | List available meters |
 | `ping()` | Verify API connection |
+
+---
+
+## Subscription Billing
+
+```typescript
+// Create a monthly subscription
+const subscription = await drip.createSubscription({
+  customerId: customer.id,
+  name: 'Pro Plan',
+  priceUsdc: 49_000000,  // $49.00 in USDC (6 decimals)
+  interval: 'MONTHLY',
+});
+
+// List active subscriptions
+const { data } = await drip.listSubscriptions({
+  customerId: customer.id,
+  status: 'ACTIVE',
+});
+
+// Pause / resume / cancel
+await drip.pauseSubscription(subscription.id);
+await drip.resumeSubscription(subscription.id);
+await drip.cancelSubscription(subscription.id);
+```
+
+### Update Subscription
+
+```typescript
+// Update subscription name and metadata
+const updated = await drip.updateSubscription(subscription.id, {
+  name: 'Business Plan',
+  metadata: { tier: 'business' },
+});
+```
+
+### Cancel Options
+
+```typescript
+// Cancel at end of current billing period (default)
+await drip.cancelSubscription(subscription.id);
+
+// Cancel immediately
+await drip.cancelSubscription(subscription.id, { immediate: true });
+```
+
+
+---
+
+## Invoices, Contracts (REST API Only)
+
+See the [Invoices](#invoices-rest-api-only) and [Contracts](#contracts-rest-api-only) REST API tables above for available endpoints.
+
+```typescript
+// Example using fetch (SDK methods coming soon)
+const res = await fetch(`${baseUrl}/v1/invoices/generate`, {
+  method: 'POST',
+  headers: { Authorization: 'Bearer sk_live_...', 'Content-Type': 'application/json' },
+  body: JSON.stringify({
+    customerId: customer.id,
+    periodStart: '2024-01-01T00:00:00Z',
+    periodEnd: '2024-02-01T00:00:00Z',
+  }),
+});
+```
+
+**Invoice statuses:** `DRAFT` → `PENDING` → `PAID` | `PARTIALLY_PAID` | `VOIDED` | `OVERDUE`
+
+Contracts let you create per-customer commercial agreements with custom pricing, prepaid commits, spend caps, and discounts. They automatically apply when billing — the pricing engine looks up active contracts and applies overrides before calculating charges.
+
+---
+
+## Entitlements (Pre-Request Authorization)
+
+Check if a customer is allowed to use a feature **before** processing the request. This avoids wasting compute on customers who are over quota.
+
+Entitlement counters are automatically incremented when you call `charge()` — no extra work needed.
+
+```typescript
+const customer = await drip.createCustomer({ externalCustomerId: 'user_123' });
+
+// Check before processing an expensive request
+const check = await drip.checkEntitlement({
+  customerId: customer.id,
+  featureKey: 'search',
+  quantity: 1,
+});
+
+if (!check.allowed) {
+  // Customer is over quota — return 429 without processing
+  return res.status(429).json({
+    error: 'Quota exceeded',
+    remaining: check.remaining,
+    limit: check.limit,
+    resetsAt: check.periodResetsAt,
+  });
+}
+
+// Process the request, then charge
+const results = await performSearch(query);
+await drip.charge({ customerId: customer.id, meter: 'search', quantity: 1 });
+// ^ Entitlement counter auto-increments
+```
+
+### CheckEntitlementParams
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `customerId` | `string` | Yes | The Drip customer ID |
+| `featureKey` | `string` | Yes | Feature key to check (e.g., `"search"`, `"api_calls"`) |
+| `quantity` | `number` | No | Quantity to check (default: 1) |
+
+### EntitlementCheckResult
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `allowed` | `boolean` | Whether the request is permitted |
+| `featureKey` | `string` | The feature that was checked |
+| `remaining` | `number` | Remaining quota in current period (-1 if unlimited) |
+| `limit` | `number` | The limit for this period (-1 if unlimited) |
+| `unlimited` | `boolean` | Whether the customer has unlimited access |
+| `period` | `'DAILY' \| 'MONTHLY'` | The period this limit applies to |
+| `periodResetsAt` | `string` | ISO timestamp for when the period resets |
+| `reason` | `string?` | Denial reason (only present when `allowed` is `false`) |
+
+> **Setup:** Entitlement plans, rules, and customer assignments are managed via the REST API. See the [Entitlements guide](../../docs/integration/ENTITLEMENTS.md) for full API reference and setup walkthrough.
 
 ---
 
@@ -307,7 +532,7 @@ const meter = drip.createStreamMeter({
 });
 
 for await (const chunk of llmStream) {
-  meter.add(chunk.tokens);
+  await meter.add(chunk.tokens);
   yield chunk;
 }
 
@@ -364,6 +589,70 @@ await agent.invoke({ input: '...' }, { callbacks: [handler] });
 
 ---
 
+## Customer Spending Caps
+
+Set per-customer spending limits with multi-level alerts (50%, 80%, 95%, 100%). Caps auto-reset daily or monthly and can optionally auto-block charges when exceeded.
+
+```typescript
+import { Drip, SpendingCapType } from '@drip-sdk/node';
+
+const drip = new Drip({ apiKey: 'sk_live_...' });
+
+// Create a customer first (or use an existing customer.id)
+const customer = await drip.createCustomer({ externalCustomerId: 'user_123' });
+
+// Set a daily spending cap of $100 USDC
+const cap = await drip.setCustomerSpendingCap(customer.id, {
+  capType: 'DAILY_CHARGE_LIMIT',
+  limitValue: 100,
+  autoBlock: true, // Block charges when cap is reached (default)
+});
+
+// Set a monthly cap of $5,000
+await drip.setCustomerSpendingCap(customer.id, {
+  capType: 'MONTHLY_CHARGE_LIMIT',
+  limitValue: 5000,
+});
+
+// Set a single-charge limit of $50
+await drip.setCustomerSpendingCap(customer.id, {
+  capType: 'SINGLE_CHARGE_LIMIT',
+  limitValue: 50,
+});
+
+// List all active caps for a customer
+const { caps } = await drip.getCustomerSpendingCaps(customer.id);
+for (const c of caps) {
+  console.log(`${c.capType}: ${c.currentUsage}/${c.limitValue} USDC`);
+}
+
+// Remove a cap
+await drip.removeCustomerSpendingCap(customer.id, cap.id);
+```
+
+### Cap Types
+
+| Type | Description | Reset |
+|------|-------------|-------|
+| `DAILY_CHARGE_LIMIT` | Max total charges per day | Every 24 hours |
+| `MONTHLY_CHARGE_LIMIT` | Max total charges per month | Every 30 days |
+| `SINGLE_CHARGE_LIMIT` | Max amount for a single charge | N/A |
+
+### Spending Alert Webhooks
+
+When a customer approaches their cap, Drip emits webhook events at these thresholds:
+
+| Threshold | Event | Level |
+|-----------|-------|-------|
+| 50% | `customer.spending.warning` | `info` |
+| 80% | `customer.spending.warning` | `warning` |
+| 95% | `customer.spending.warning` | `critical` |
+| 100% | `customer.spending.blocked` | `blocked` |
+
+Each alert level fires only once per period. Subscribe to these events via webhooks to get real-time notifications.
+
+---
+
 ## Webhooks
 
 > **Secret key required.** All webhook management methods require an `sk_` key. Public keys (`pk_`) will receive a `DripError` with code `PUBLIC_KEY_NOT_ALLOWED` (HTTP 403).
@@ -382,11 +671,11 @@ const webhook = await drip.createWebhook({
 // Verify incoming webhook (static method, no key needed)
 import { Drip } from '@drip-sdk/node';
 
-const isValid = Drip.verifyWebhookSignature({
-  payload: request.body,
-  signature: request.headers['x-drip-signature'],
-  secret: webhookSecret,
-});
+const isValid = await Drip.verifyWebhookSignature(
+  request.body,
+  request.headers['x-drip-signature'],
+  webhookSecret,
+);
 ```
 
 ---
@@ -408,14 +697,24 @@ const result = await drip.charge({
 const balance = await drip.getBalance(customer.id);
 console.log(`Balance: $${balance.balanceUsdc}`);
 
+// Async charge — returns 202, processes in background
+// Use when you need fast response times and can handle eventual consistency via webhooks
+const asyncResult = await drip.chargeAsync({
+  customerId: customer.id,
+  meter: 'tokens',
+  quantity: 1500,
+});
+console.log(`Queued: ${asyncResult.charge.id}, status: ${asyncResult.charge.status}`);
+// Subscribe to charge.succeeded / charge.failed webhooks for final status
+
 // Query charges
 const charge = await drip.getCharge(result.charge.id);
 const charges = await drip.listCharges({ customerId: customer.id });
 
 // Cost estimation from actual usage
-const startDate = new Date('2024-01-01');
-const endDate = new Date('2024-01-31');
-await drip.estimateFromUsage({ customerId: customer.id, startDate, endDate });
+const periodStart = new Date('2024-01-01');
+const periodEnd = new Date('2024-01-31');
+await drip.estimateFromUsage({ customerId: customer.id, periodStart, periodEnd });
 
 // Cost estimation from hypothetical usage (no real data needed)
 const estimate = await drip.estimateFromHypothetical({
@@ -428,7 +727,7 @@ console.log(`Estimated cost: $${estimate.estimatedTotalUsdc}`);
 
 // Wrap external API call with guaranteed usage recording
 const result = await drip.wrapApiCall({
-  customerId: 'customer_123',
+  customerId: customer.id,
   meter: 'tokens',
   call: async () => openai.chat.completions.create({ model: 'gpt-4', messages }),
   extractUsage: (response) => response.usage.total_tokens,
@@ -436,7 +735,37 @@ const result = await drip.wrapApiCall({
 // result.result = the API response, result.charge = the Drip charge
 
 // Checkout (fiat on-ramp)
-await drip.checkout({ customerId: customer.id, amountUsd: 5000 });
+await drip.checkout({ customerId: customer.id, amount: 5000, returnUrl: 'https://yourapp.com/success' });
+```
+
+---
+
+## Event Querying
+
+Query execution events recorded via `emitEvent()` or `emitEventsBatch()`.
+
+```typescript
+// List all events for a customer
+const { data: events, total } = await drip.listEvents({
+  customerId: customer.id,
+});
+console.log(`${total} events found`);
+
+// Filter by event type and outcome
+const failures = await drip.listEvents({
+  customerId: customer.id,
+  eventType: 'tool_call',
+  outcome: 'FAILURE',
+  limit: 10,
+});
+
+// Get full details for a single event
+const event = await drip.getEvent(events[0].id);
+console.log(`${event.eventType}: ${event.outcome}`);
+
+// Get causality trace — shows parent chain, children, and retries
+const trace = await drip.getEventTrace(events[0].id);
+console.log(`Ancestors: ${trace.ancestors.length}, Children: ${trace.children.length}`);
 ```
 
 ---
@@ -472,7 +801,7 @@ try {
 
 ### Idempotency
 
-Use idempotency keys to prevent duplicate charges on retries:
+The API requires an `idempotencyKey` on every mutating request (`charge`, `trackUsage`, `emitEvent`, and each event in `emitEventsBatch`). The SDK **always generates one automatically** if you don't provide it — so zero configuration is needed for basic use. Pass your own key when you need application-level deduplication across process restarts:
 
 ```typescript
 const customer = await drip.createCustomer({ externalCustomerId: 'user_123' });
@@ -531,11 +860,11 @@ import type {
 
 ## Requirements
 
-- Node.js 18.0.0 or higher
+- Node.js 18.0.0 or higher (SDK supports Node 18+; the Drip monorepo uses Node 24.x)
 
 ## Links
 
 - [Core SDK (README)](./README.md)
-- [API Documentation](https://docs.drippay.dev)
+- [API Reference](https://docs.drippay.dev/api-reference)
 - [GitHub](https://github.com/MichaelLevin5908/drip)
 - [npm](https://www.npmjs.com/package/@drip-sdk/node)

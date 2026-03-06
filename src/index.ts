@@ -150,7 +150,7 @@ export interface DripConfig {
   /**
    * Base URL for the Drip API. Defaults to production API.
    * Falls back to `DRIP_BASE_URL` environment variable if not provided.
-   * @default "https://drip-app-hlunj.ondigitalocean.app/v1"
+   * @default "https://api.drippay.dev/v1"
    */
   baseUrl?: string;
 
@@ -269,6 +269,12 @@ export interface ListCustomersOptions {
   limit?: number;
 
   /**
+   * Number of customers to skip (for pagination).
+   * @default 0
+   */
+  offset?: number;
+
+  /**
    * Filter by customer status.
    */
   status?: 'ACTIVE' | 'LOW_BALANCE' | 'PAUSED';
@@ -306,6 +312,103 @@ export interface BalanceResult {
 
   /** ISO timestamp of last balance sync */
   lastSyncedAt: string | null;
+}
+
+// ============================================================================
+// Customer Spending Cap Types
+// ============================================================================
+
+/** Cap types for per-customer spending limits */
+export type SpendingCapType = 'DAILY_CHARGE_LIMIT' | 'MONTHLY_CHARGE_LIMIT' | 'SINGLE_CHARGE_LIMIT';
+
+/**
+ * Parameters for setting a per-customer spending cap.
+ */
+export interface SetSpendingCapParams {
+  /** Cap type: daily, monthly, or single-charge limit */
+  capType: SpendingCapType;
+
+  /** Spending limit in USDC */
+  limitValue: number;
+
+  /** Auto-block charges when cap is reached (default: true) */
+  autoBlock?: boolean;
+}
+
+/**
+ * A per-customer spending cap with current usage tracking.
+ */
+export interface CustomerSpendingCap {
+  /** Cap ID */
+  id: string;
+
+  /** Cap type */
+  capType: string;
+
+  /** Limit value in USDC */
+  limitValue: string;
+
+  /** Current period usage in USDC */
+  currentUsage: string;
+
+  /** Start of the current cap period */
+  periodStart: string;
+
+  /** Whether cap is active */
+  isActive: boolean;
+
+  /** Whether charges are auto-blocked at 100% */
+  autoBlock: boolean;
+
+  /** Last alert level emitted (50, 80, 95, 100) */
+  lastAlertLevel: string | null;
+}
+
+// ============================================================================
+// Entitlement Types
+// ============================================================================
+
+/**
+ * Parameters for checking a customer's entitlement to use a feature.
+ */
+export interface CheckEntitlementParams {
+  /** The Drip customer ID */
+  customerId: string;
+
+  /** Feature key to check (e.g., "search", "api_calls", "tokens") */
+  featureKey: string;
+
+  /** Quantity to check against the limit (default: 1) */
+  quantity?: number;
+}
+
+/**
+ * Result of an entitlement check.
+ */
+export interface EntitlementCheckResult {
+  /** Whether the customer is allowed to use this feature */
+  allowed: boolean;
+
+  /** The feature that was checked */
+  featureKey: string;
+
+  /** Remaining quota in the current period (-1 if unlimited) */
+  remaining: number;
+
+  /** The limit for this period (-1 if unlimited) */
+  limit: number;
+
+  /** Whether the customer has unlimited access */
+  unlimited: boolean;
+
+  /** The period this limit applies to */
+  period: 'DAILY' | 'MONTHLY';
+
+  /** When the current period resets (ISO timestamp) */
+  periodResetsAt: string;
+
+  /** Reason for denial (only present when allowed=false) */
+  reason?: string;
 }
 
 // ============================================================================
@@ -371,8 +474,8 @@ export interface ChargeResult {
     /** Amount in native token */
     amountToken: string;
 
-    /** Blockchain transaction hash */
-    txHash: string;
+    /** Blockchain transaction hash (null until settled) */
+    txHash: string | null;
 
     /** Current status of the charge */
     status: ChargeStatus;
@@ -563,6 +666,9 @@ export type WebhookEventType =
   | 'customer.deposit.confirmed'
   | 'customer.withdraw.confirmed'
   | 'customer.usage_cap.reached'
+  | 'customer.spending.warning'
+  | 'customer.spending.blocked'
+  | 'customer.spending.exceeded'
   | 'webhook.endpoint.unhealthy'
   | 'customer.created'
   | 'api_key.created'
@@ -570,7 +676,30 @@ export type WebhookEventType =
   | 'transaction.created'
   | 'transaction.pending'
   | 'transaction.confirmed'
-  | 'transaction.failed';
+  | 'transaction.failed'
+  | 'subscription.created'
+  | 'subscription.renewed'
+  | 'subscription.cancelled'
+  | 'subscription.paused'
+  | 'subscription.resumed'
+  | 'subscription.trial_ended'
+  | 'subscription.payment_failed';
+
+/**
+ * Per-endpoint routing filters for webhooks.
+ * All specified criteria use AND logic — a webhook must match ALL filters.
+ * Within each filter type, values use OR logic (match any).
+ */
+export interface WebhookFilters {
+  /** Only receive events for these usage types / endpoint names */
+  usageTypes?: string[];
+
+  /** Only receive events for these customer IDs */
+  customerIds?: string[];
+
+  /** Only receive events with these severity levels */
+  severities?: ('low' | 'medium' | 'high' | 'critical')[];
+}
 
 /**
  * Parameters for creating a webhook.
@@ -593,6 +722,44 @@ export interface CreateWebhookParams {
    * Optional description for the webhook.
    */
   description?: string;
+
+  /**
+   * Optional per-endpoint routing filters.
+   * When set, only events matching ALL filter criteria are delivered.
+   * @example { usageTypes: ["tokens"], customerIds: ["cust_abc123"] }
+   */
+  filters?: WebhookFilters;
+}
+
+/**
+ * Parameters for updating a webhook.
+ *
+ * @example
+ * ```typescript
+ * // Add filters to route only specific events
+ * await drip.updateWebhook('wh_abc123', {
+ *   filters: { customerIds: ['cust_xyz'], severities: ['high', 'critical'] },
+ * });
+ *
+ * // Remove all filters (receive all events again)
+ * await drip.updateWebhook('wh_abc123', { filters: null });
+ * ```
+ */
+export interface UpdateWebhookParams {
+  /** New webhook URL */
+  url?: string;
+
+  /** New event subscriptions */
+  events?: WebhookEventType[];
+
+  /** New description */
+  description?: string;
+
+  /** Enable/disable the webhook */
+  isActive?: boolean;
+
+  /** Per-endpoint filters. Set to `null` to remove all filters. */
+  filters?: WebhookFilters | null;
 }
 
 /**
@@ -610,6 +777,9 @@ export interface Webhook {
 
   /** Description */
   description: string | null;
+
+  /** Per-endpoint routing filters, or null if no filters are set */
+  filters: WebhookFilters | null;
 
   /** Whether the webhook is active */
   isActive: boolean;
@@ -731,6 +901,186 @@ export interface CheckoutResult {
 
   /** Amount in USD */
   amountUsd: number;
+}
+
+// ============================================================================
+// Subscription Types
+// ============================================================================
+
+/** Status of a subscription. */
+export type SubscriptionStatus =
+  | 'ACTIVE'
+  | 'PAUSED'
+  | 'CANCELLED'
+  | 'EXPIRED'
+  | 'PAST_DUE'
+  | 'TRIALING';
+
+/** Billing interval for a subscription. */
+export type SubscriptionInterval = 'DAILY' | 'WEEKLY' | 'MONTHLY' | 'ANNUAL';
+
+/**
+ * Parameters for creating a new subscription.
+ */
+export interface CreateSubscriptionParams {
+  /** Customer ID to subscribe */
+  customerId: string;
+
+  /** Human-readable subscription name */
+  name: string;
+
+  /** Optional description */
+  description?: string;
+
+  /** Billing interval */
+  interval: SubscriptionInterval;
+
+  /** Price per interval in USDC */
+  priceUsdc: number;
+
+  /** Custom metadata */
+  metadata?: Record<string, unknown>;
+
+  /** Trial period in days (omit for no trial) */
+  trialDays?: number;
+
+  /** Included usage units per period (for hybrid subscriptions) */
+  includedUsage?: number;
+
+  /** Usage type for overage metering (links to PricingPlan) */
+  overageUnitType?: string;
+}
+
+/**
+ * Parameters for updating an existing subscription.
+ */
+export interface UpdateSubscriptionParams {
+  /** Updated subscription name */
+  name?: string;
+
+  /** Updated description */
+  description?: string;
+
+  /** Updated price (takes effect at next billing period) */
+  priceUsdc?: number;
+
+  /** Updated metadata */
+  metadata?: Record<string, unknown>;
+
+  /** Updated included usage */
+  includedUsage?: number;
+
+  /** Updated overage unit type */
+  overageUnitType?: string;
+}
+
+/**
+ * Parameters for cancelling a subscription.
+ */
+export interface CancelSubscriptionParams {
+  /** Cancel immediately instead of at period end. @default false */
+  immediate?: boolean;
+}
+
+/**
+ * Parameters for pausing a subscription.
+ */
+export interface PauseSubscriptionParams {
+  /** ISO date-time string for auto-resume (optional) */
+  resumeDate?: string;
+}
+
+/**
+ * A Drip subscription record.
+ */
+export interface Subscription {
+  /** Unique subscription ID */
+  id: string;
+
+  /** Business ID */
+  businessId: string;
+
+  /** Customer ID */
+  customerId: string;
+
+  /** Subscription name */
+  name: string;
+
+  /** Optional description */
+  description: string | null;
+
+  /** Billing interval */
+  interval: SubscriptionInterval;
+
+  /** Price per interval in USDC */
+  priceUsdc: string;
+
+  /** Current status */
+  status: SubscriptionStatus;
+
+  /** Start of current billing period (ISO timestamp) */
+  currentPeriodStart: string;
+
+  /** End of current billing period (ISO timestamp) */
+  currentPeriodEnd: string;
+
+  /** When cancellation was requested (ISO timestamp, null if not cancelled) */
+  cancelledAt: string | null;
+
+  /** Whether subscription cancels at end of current period */
+  cancelAtPeriodEnd: boolean;
+
+  /** When subscription was paused (ISO timestamp) */
+  pausedAt: string | null;
+
+  /** Scheduled resume date (ISO timestamp) */
+  resumesAt: string | null;
+
+  /** Trial period start (ISO timestamp) */
+  trialStart: string | null;
+
+  /** Trial period end (ISO timestamp) */
+  trialEnd: string | null;
+
+  /** Included usage units per period */
+  includedUsage: number | null;
+
+  /** Usage type for overage metering */
+  overageUnitType: string | null;
+
+  /** Custom metadata */
+  metadata: Record<string, unknown> | null;
+
+  /** ISO timestamp of creation */
+  createdAt: string;
+
+  /** ISO timestamp of last update */
+  updatedAt: string;
+}
+
+/**
+ * Options for listing subscriptions.
+ */
+export interface ListSubscriptionsOptions {
+  /** Filter by customer ID */
+  customerId?: string;
+
+  /** Filter by status */
+  status?: SubscriptionStatus;
+
+  /** Maximum results (1-100, default 100) */
+  limit?: number;
+}
+
+/**
+ * Response from listing subscriptions.
+ */
+export interface ListSubscriptionsResponse {
+  /** Array of subscriptions */
+  data: Subscription[];
+
+  /** Total count */
+  count: number;
 }
 
 // ============================================================================
@@ -1306,25 +1656,176 @@ export interface WrapApiCallResult<T> {
 // Error Types
 // ============================================================================
 
+import { DripError } from './errors.js';
+export { DripError };
+
+// ============================================================================
+// Portal Session Types
+// ============================================================================
+
 /**
- * Error thrown by Drip SDK operations.
+ * Parameters for creating a portal session.
  */
-export class DripError extends Error {
+export interface CreatePortalSessionParams {
   /**
-   * Creates a new DripError.
-   * @param message - Human-readable error message
-   * @param statusCode - HTTP status code from the API
-   * @param code - Machine-readable error code
+   * The customer ID (internal or external) to create a portal session for.
+   * The customer must belong to your business.
    */
-  constructor(
-    message: string,
-    public statusCode: number,
-    public code?: string,
-  ) {
-    super(message);
-    this.name = 'DripError';
-    Object.setPrototypeOf(this, DripError.prototype);
-  }
+  customerId: string;
+
+  /**
+   * How long the portal link is valid, in minutes.
+   * Clamped to 5–1440 (24 hours). Default: 60.
+   */
+  expiresInMinutes?: number;
+}
+
+/**
+ * A portal session returned by `createPortalSession()`.
+ */
+export interface PortalSession {
+  /** Unique session ID (use this to revoke the session). */
+  id: string;
+
+  /** Opaque token embedded in the portal URL. */
+  token: string;
+
+  /** The resolved internal customer ID. */
+  customerId: string;
+
+  /** ISO-8601 expiry timestamp. */
+  expiresAt: string;
+
+  /** Relative URL path for the portal (e.g. "/portal/abc123..."). */
+  url: string;
+}
+
+// ============================================================================
+// Async Usage Types
+// ============================================================================
+
+/**
+ * Result of an async charge operation.
+ * The charge is queued for background processing — subscribe to
+ * `charge.succeeded` / `charge.failed` webhooks for final status.
+ */
+export interface ChargeAsyncResult {
+  /** Whether the request was accepted */
+  success: boolean;
+
+  /** The usage event ID */
+  usageEventId: string;
+
+  /** True if this was a deduplicated replay */
+  isDuplicate: boolean;
+
+  /** Details about the queued charge */
+  charge: {
+    /** Unique charge ID */
+    id: string;
+
+    /** Amount in USDC (6 decimals) */
+    amountUsdc: string;
+
+    /** Current status (typically PENDING) */
+    status: string;
+
+    /** Estimated time until confirmation (e.g. "30s") */
+    estimatedConfirmationTime?: string;
+  };
+
+  /** Human-readable message */
+  message: string;
+}
+
+// ============================================================================
+// Events Types
+// ============================================================================
+
+/**
+ * Options for listing execution events.
+ */
+export interface ListEventsOptions {
+  /** Filter by customer ID */
+  customerId?: string;
+
+  /** Filter by run ID */
+  runId?: string;
+
+  /** Filter by event type */
+  eventType?: string;
+
+  /** Filter by outcome (SUCCESS, FAILURE, etc.) */
+  outcome?: string;
+
+  /** Maximum results (1-100, default 100) */
+  limit?: number;
+
+  /** Number of events to skip for pagination */
+  offset?: number;
+}
+
+/**
+ * An execution event record.
+ */
+export interface ExecutionEvent {
+  /** Unique event ID */
+  id: string;
+
+  /** Customer ID */
+  customerId: string;
+
+  /** Run ID (if part of a run) */
+  runId?: string;
+
+  /** Event type / action name */
+  eventType: string;
+
+  /** Outcome of the event */
+  outcome: string;
+
+  /** Human-readable explanation */
+  explanation?: string;
+
+  /** ISO-8601 timestamp */
+  createdAt: string;
+
+  /** Additional metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * Paginated list of events.
+ */
+export interface ListEventsResponse {
+  /** Array of events */
+  data: ExecutionEvent[];
+
+  /** Total count matching filters */
+  total: number;
+
+  /** Applied limit */
+  limit: number;
+
+  /** Applied offset */
+  offset: number;
+}
+
+/**
+ * Causality trace for an event — ancestors, children, and retry chain.
+ */
+export interface EventTrace {
+  /** The event ID that was traced */
+  eventId: string;
+
+  /** Parent chain from root to this event's parent */
+  ancestors: ExecutionEvent[];
+
+  /** Direct child events caused by this event */
+  children: ExecutionEvent[];
+
+  /** If retried, all retry attempts */
+  retryChain: ExecutionEvent[];
 }
 
 // ============================================================================
@@ -1402,7 +1903,7 @@ export class Drip {
   constructor(config: DripConfig = {}) {
     // Read from config or fall back to environment variables
     const apiKey = config.apiKey ?? (typeof process !== 'undefined' ? process.env.DRIP_API_KEY : undefined);
-    const baseUrl = config.baseUrl ?? (typeof process !== 'undefined' ? process.env.DRIP_BASE_URL : undefined);
+    const baseUrl = config.baseUrl ?? (typeof process !== 'undefined' ? (process.env.DRIP_API_URL ?? process.env.DRIP_BASE_URL) : undefined);
 
     if (!apiKey) {
       throw new Error(
@@ -1411,7 +1912,7 @@ export class Drip {
     }
 
     this.apiKey = apiKey;
-    this.baseUrl = baseUrl || 'https://drip-app-hlunj.ondigitalocean.app/v1';
+    this.baseUrl = baseUrl || 'https://api.drippay.dev/v1';
     this.timeout = config.timeout || 30000;
 
     // Detect key type from prefix
@@ -1508,6 +2009,7 @@ export class Drip {
           data.message || data.error || 'Request failed',
           res.status,
           data.code,
+          data,
         );
       }
 
@@ -1732,6 +2234,9 @@ export class Drip {
     if (options?.limit) {
       params.set('limit', options.limit.toString());
     }
+    if (options?.offset) {
+      params.set('offset', options.offset.toString());
+    }
     if (options?.status) {
       params.set('status', options.status);
     }
@@ -1743,6 +2248,53 @@ export class Drip {
   }
 
   /**
+   * Gets or creates a customer by external ID. Never throws on duplicate.
+   *
+   * Equivalent to `createCustomer()` but idempotent — if a customer with
+   * the given `externalCustomerId` already exists, it is returned instead
+   * of throwing a 409 error.
+   *
+   * @param externalCustomerId - Your internal user/account ID
+   * @param metadata - Optional metadata (only used on first creation)
+   * @returns The customer (created or existing)
+   *
+   * @example
+   * ```typescript
+   * // Safe to call on every request — only creates once
+   * const customer = await drip.getOrCreateCustomer('user_123');
+   * await drip.charge({ customerId: customer.id, meter: 'api_calls', quantity: 1 });
+   * ```
+   */
+  async getOrCreateCustomer(
+    externalCustomerId: string,
+    metadata?: Record<string, unknown>,
+  ): Promise<Customer> {
+    try {
+      return await this.createCustomer({ externalCustomerId, metadata });
+    } catch (error) {
+      if (!(error instanceof DripError) || error.statusCode !== 409) {
+        throw error;
+      }
+      // Customer already exists — use existingCustomerId from 409 body
+      const existingId = error.data?.existingCustomerId as string | undefined;
+      if (existingId) {
+        return this.getCustomer(existingId);
+      }
+      // Fallback: list and search (for older backends without existingCustomerId)
+      const { data } = await this.listCustomers({ limit: 100 });
+      const match = data.find((c) => c.externalCustomerId === externalCustomerId);
+      if (match) {
+        return this.getCustomer(match.id);
+      }
+      throw new DripError(
+        `Customer with externalCustomerId '${externalCustomerId}' exists but could not be resolved`,
+        409,
+        'CUSTOMER_RESOLUTION_FAILED',
+      );
+    }
+  }
+
+  /**
    * Gets the current balance for a customer.
    *
    * @param customerId - The Drip customer ID
@@ -1751,11 +2303,89 @@ export class Drip {
    * @example
    * ```typescript
    * const balance = await drip.getBalance('cust_abc123');
-   * console.log(`Balance: ${balance.balanceUSDC} USDC`);
+   * console.log(`Balance: ${balance.balanceUsdc} USDC`);
    * ```
    */
   async getBalance(customerId: string): Promise<BalanceResult> {
     return this.request<BalanceResult>(`/customers/${customerId}/balance`);
+  }
+
+  // ==========================================================================
+  // Customer Spending Caps
+  // ==========================================================================
+
+  /**
+   * Sets a per-customer spending cap.
+   *
+   * Caps limit how much a single customer can be charged per day, per month,
+   * or per individual charge. Multi-level alerts fire at 50%, 80%, 95%, and
+   * 100% via `customer.spending.warning` / `customer.spending.blocked` webhooks.
+   *
+   * @param customerId - The Drip customer ID
+   * @param params - Cap parameters
+   * @returns The created/updated spending cap
+   *
+   * @example
+   * ```typescript
+   * // Limit customer to $500/month
+   * const cap = await drip.setCustomerSpendingCap('cust_abc123', {
+   *   capType: 'MONTHLY_CHARGE_LIMIT',
+   *   limitValue: 500,
+   *   autoBlock: true,
+   * });
+   * ```
+   */
+  async setCustomerSpendingCap(
+    customerId: string,
+    params: SetSpendingCapParams,
+  ): Promise<CustomerSpendingCap> {
+    return this.request<CustomerSpendingCap>(
+      `/customers/${customerId}/spending-cap`,
+      { method: 'PUT', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Lists all active spending caps for a customer.
+   *
+   * @param customerId - The Drip customer ID
+   * @returns List of active spending caps with current usage
+   *
+   * @example
+   * ```typescript
+   * const { caps } = await drip.getCustomerSpendingCaps('cust_abc123');
+   * for (const cap of caps) {
+   *   console.log(`${cap.capType}: ${cap.currentUsage}/${cap.limitValue} USDC`);
+   * }
+   * ```
+   */
+  async getCustomerSpendingCaps(
+    customerId: string,
+  ): Promise<{ caps: CustomerSpendingCap[] }> {
+    return this.request<{ caps: CustomerSpendingCap[] }>(
+      `/customers/${customerId}/spending-caps`,
+    );
+  }
+
+  /**
+   * Removes a spending cap for a customer.
+   *
+   * @param customerId - The Drip customer ID
+   * @param capId - The spending cap ID to remove
+   *
+   * @example
+   * ```typescript
+   * await drip.removeCustomerSpendingCap('cust_abc123', 'cap_xyz');
+   * ```
+   */
+  async removeCustomerSpendingCap(
+    customerId: string,
+    capId: string,
+  ): Promise<{ success: boolean }> {
+    return this.request<{ success: boolean }>(
+      `/customers/${customerId}/spending-caps/${capId}`,
+      { method: 'DELETE' },
+    );
   }
 
   // ==========================================================================
@@ -1768,7 +2398,7 @@ export class Drip {
    * This is the primary method for billing customers. It:
    * 1. Records the usage event
    * 2. Calculates the charge based on your pricing plan
-   * 3. Executes the on-chain charge
+   * 3. Creates a charge that batch-settles on-chain when the threshold is met
    *
    * @param params - Charge parameters
    * @returns The charge result
@@ -1883,8 +2513,11 @@ export class Drip {
   async wrapApiCall<T>(params: WrapApiCallParams<T>): Promise<WrapApiCallResult<T>> {
     // Generate idempotency key BEFORE the call - this is the key insight!
     // Even if we crash after the API call, retrying with the same key is safe.
+    // CRIT-09: Deterministic key — no Date.now() or Math.random().
+    // quantity isn't known until after the call, so we use customerId + meter.
+    // The monotonic counter in deterministicIdempotencyKey ensures uniqueness.
     const idempotencyKey = params.idempotencyKey
-      ?? `wrap_${Date.now()}_${Math.random().toString(36).slice(2, 11)}`;
+      ?? deterministicIdempotencyKey('wrap', params.customerId, params.meter);
 
     // Step 1: Make the external API call (no retry - we don't control this)
     const result = await params.call();
@@ -1961,6 +2594,130 @@ export class Drip {
   }
 
   /**
+   * Charges a customer asynchronously — returns immediately with 202.
+   *
+   * The charge is queued for background processing. Subscribe to
+   * `charge.succeeded` / `charge.failed` webhooks for final status.
+   *
+   * Use this when you need fast response times and can handle
+   * eventual consistency via webhooks.
+   *
+   * @param params - Same parameters as `charge()`
+   * @returns Accepted result with queued charge details
+   *
+   * @example
+   * ```typescript
+   * const result = await drip.chargeAsync({
+   *   customerId: 'cust_abc123',
+   *   meter: 'tokens',
+   *   quantity: 1500,
+   * });
+   *
+   * console.log(`Queued: ${result.charge.id}`);
+   * // Listen for webhooks to get final status
+   * ```
+   */
+  async chargeAsync(params: ChargeParams): Promise<ChargeAsyncResult> {
+    const idempotencyKey = params.idempotencyKey
+      ?? deterministicIdempotencyKey('chg-async', params.customerId, params.meter, params.quantity);
+
+    return this.request<ChargeAsyncResult>('/usage/async', {
+      method: 'POST',
+      body: JSON.stringify({
+        customerId: params.customerId,
+        usageType: params.meter,
+        quantity: params.quantity,
+        idempotencyKey,
+        metadata: params.metadata,
+      }),
+    });
+  }
+
+  /**
+   * Lists execution events with optional filters.
+   *
+   * @param options - Optional filtering and pagination
+   * @returns Paginated list of events
+   *
+   * @example
+   * ```typescript
+   * // List all events for a customer
+   * const { data: events } = await drip.listEvents({
+   *   customerId: 'cust_abc123',
+   * });
+   *
+   * // Filter by event type
+   * const { data: toolCalls } = await drip.listEvents({
+   *   eventType: 'tool_call',
+   *   outcome: 'SUCCESS',
+   * });
+   * ```
+   */
+  async listEvents(options?: ListEventsOptions): Promise<ListEventsResponse> {
+    const params = new URLSearchParams();
+
+    if (options?.customerId) {
+      params.set('customerId', options.customerId);
+    }
+    if (options?.runId) {
+      params.set('runId', options.runId);
+    }
+    if (options?.eventType) {
+      params.set('eventType', options.eventType);
+    }
+    if (options?.outcome) {
+      params.set('outcome', options.outcome);
+    }
+    if (options?.limit !== undefined) {
+      params.set('limit', String(options.limit));
+    }
+    if (options?.offset !== undefined) {
+      params.set('offset', String(options.offset));
+    }
+
+    const query = params.toString();
+    return this.request<ListEventsResponse>(`/events${query ? `?${query}` : ''}`);
+  }
+
+  /**
+   * Retrieves a single execution event by ID.
+   *
+   * @param eventId - The event ID
+   * @returns Full event details
+   * @throws {DripError} If event not found (404)
+   *
+   * @example
+   * ```typescript
+   * const event = await drip.getEvent('evt_abc123');
+   * console.log(`${event.eventType}: ${event.outcome}`);
+   * ```
+   */
+  async getEvent(eventId: string): Promise<ExecutionEvent> {
+    return this.request<ExecutionEvent>(`/events/${eventId}`);
+  }
+
+  /**
+   * Gets the full causality trace for an event.
+   *
+   * Returns ancestors (parent chain), children (caused by this event),
+   * and retry chain (if the event was retried).
+   *
+   * @param eventId - The event ID to trace
+   * @returns Causality trace with ancestors, children, and retry chain
+   * @throws {DripError} If event not found (404)
+   *
+   * @example
+   * ```typescript
+   * const trace = await drip.getEventTrace('evt_abc123');
+   * console.log(`Ancestors: ${trace.ancestors.length}`);
+   * console.log(`Children: ${trace.children.length}`);
+   * ```
+   */
+  async getEventTrace(eventId: string): Promise<EventTrace> {
+    return this.request<EventTrace>(`/events/${eventId}/trace`);
+  }
+
+  /**
    * Retrieves a specific charge by ID.
    *
    * @param chargeId - The charge ID
@@ -2017,28 +2774,45 @@ export class Drip {
     return this.request<ListChargesResponse>(path);
   }
 
+  // ==========================================================================
+  // Entitlement Methods (Quota Management)
+  // ==========================================================================
+
   /**
-   * Gets the current status of a charge.
+   * Check if a customer is allowed to use a feature based on their entitlement plan.
    *
-   * Useful for polling charge status after async operations.
+   * Use this before processing expensive requests to avoid wasting compute
+   * on customers who are over their quota.
    *
-   * @param chargeId - The charge ID
-   * @returns Current charge status
+   * @param params - Entitlement check parameters
+   * @returns Whether the customer is allowed, with remaining quota info
    *
    * @example
    * ```typescript
-   * const status = await drip.getChargeStatus('chg_abc123');
-   * if (status.status === 'CONFIRMED') {
-   *   console.log('Charge confirmed!');
+   * const result = await drip.checkEntitlement({
+   *   customerId: 'cust_abc123',
+   *   featureKey: 'search',
+   *   quantity: 1,
+   * });
+   *
+   * if (!result.allowed) {
+   *   return res.status(429).json({
+   *     error: 'Quota exceeded',
+   *     remaining: result.remaining,
+   *     resetsAt: result.periodResetsAt,
+   *   });
    * }
    * ```
    */
-  async getChargeStatus(
-    chargeId: string,
-  ): Promise<{ id: string; status: ChargeStatus; txHash: string | null; confirmedAt: string | null; failureReason: string | null }> {
-    return this.request<{ id: string; status: ChargeStatus; txHash: string | null; confirmedAt: string | null; failureReason: string | null }>(
-      `/charges/${chargeId}/status`,
-    );
+  async checkEntitlement(params: CheckEntitlementParams): Promise<EntitlementCheckResult> {
+    return this.request<EntitlementCheckResult>('/entitlements/check', {
+      method: 'POST',
+      body: JSON.stringify({
+        customerId: params.customerId,
+        featureKey: params.featureKey,
+        quantity: params.quantity ?? 1,
+      }),
+    });
   }
 
   // ==========================================================================
@@ -2148,6 +2922,35 @@ export class Drip {
   }
 
   /**
+   * Updates an existing webhook endpoint.
+   *
+   * @param webhookId - The webhook ID to update
+   * @param params - Fields to update
+   * @returns The updated webhook
+   *
+   * @example
+   * ```typescript
+   * // Add per-endpoint filters
+   * const updated = await drip.updateWebhook('wh_abc123', {
+   *   filters: { customerIds: ['cust_xyz'], severities: ['high'] },
+   * });
+   *
+   * // Remove all filters
+   * await drip.updateWebhook('wh_abc123', { filters: null });
+   * ```
+   */
+  async updateWebhook(
+    webhookId: string,
+    params: UpdateWebhookParams,
+  ): Promise<Webhook> {
+    this.assertSecretKey('updateWebhook()');
+    return this.request<Webhook>(`/webhooks/${webhookId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
    * Lists all webhook endpoints for your business.
    *
    * @returns List of webhooks with delivery statistics
@@ -2249,6 +3052,188 @@ export class Drip {
     this.assertSecretKey('rotateWebhookSecret()');
     return this.request<{ secret: string; message: string }>(
       `/webhooks/${webhookId}/rotate-secret`,
+      { method: 'POST' },
+    );
+  }
+
+  // ==========================================================================
+  // Subscription Methods
+  // ==========================================================================
+
+  /**
+   * Creates a new recurring subscription for a customer.
+   *
+   * @param params - Subscription creation parameters
+   * @returns The created subscription
+   *
+   * @example
+   * ```typescript
+   * const sub = await drip.createSubscription({
+   *   customerId: 'cust_abc123',
+   *   name: 'Pro Plan',
+   *   interval: 'MONTHLY',
+   *   priceUsdc: 49.99,
+   * });
+   * ```
+   */
+  async createSubscription(
+    params: CreateSubscriptionParams,
+  ): Promise<Subscription> {
+    this.assertSecretKey('createSubscription');
+    return this.request<Subscription>('/subscriptions', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Retrieves a subscription by ID.
+   *
+   * @param subscriptionId - The subscription ID
+   * @returns The subscription details
+   *
+   * @example
+   * ```typescript
+   * const sub = await drip.getSubscription('sub_abc123');
+   * console.log(`Status: ${sub.status}, Next billing: ${sub.currentPeriodEnd}`);
+   * ```
+   */
+  async getSubscription(subscriptionId: string): Promise<Subscription> {
+    return this.request<Subscription>(`/subscriptions/${subscriptionId}`);
+  }
+
+  /**
+   * Lists subscriptions for your business.
+   *
+   * @param options - Filter and pagination options
+   * @returns List of subscriptions
+   *
+   * @example
+   * ```typescript
+   * const { data: subs } = await drip.listSubscriptions({ status: 'ACTIVE' });
+   * subs.forEach(s => console.log(`${s.name}: $${s.priceUsdc}/${s.interval}`));
+   * ```
+   */
+  async listSubscriptions(
+    options?: ListSubscriptionsOptions,
+  ): Promise<ListSubscriptionsResponse> {
+    const params: Record<string, string> = {};
+    if (options?.customerId) params.customerId = options.customerId;
+    if (options?.status) params.status = options.status;
+    if (options?.limit) params.limit = String(options.limit);
+
+    const queryString = Object.entries(params)
+      .map(([k, v]) => `${k}=${encodeURIComponent(v)}`)
+      .join('&');
+
+    const path = queryString ? `/subscriptions?${queryString}` : '/subscriptions';
+    return this.request<ListSubscriptionsResponse>(path);
+  }
+
+  /**
+   * Updates a subscription. Price changes take effect at the next billing period.
+   *
+   * @param subscriptionId - The subscription ID
+   * @param params - Fields to update
+   * @returns The updated subscription
+   *
+   * @example
+   * ```typescript
+   * const updated = await drip.updateSubscription('sub_abc123', {
+   *   priceUsdc: 99.99,
+   *   name: 'Enterprise Plan',
+   * });
+   * ```
+   */
+  async updateSubscription(
+    subscriptionId: string,
+    params: UpdateSubscriptionParams,
+  ): Promise<Subscription> {
+    this.assertSecretKey('updateSubscription');
+    return this.request<Subscription>(`/subscriptions/${subscriptionId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Cancels a subscription. By default, cancels at the end of the current billing period.
+   *
+   * @param subscriptionId - The subscription ID
+   * @param params - Cancellation options
+   * @returns The cancelled subscription
+   *
+   * @example
+   * ```typescript
+   * // Cancel at end of period (default)
+   * await drip.cancelSubscription('sub_abc123');
+   *
+   * // Cancel immediately
+   * await drip.cancelSubscription('sub_abc123', { immediate: true });
+   * ```
+   */
+  async cancelSubscription(
+    subscriptionId: string,
+    params?: CancelSubscriptionParams,
+  ): Promise<Subscription> {
+    this.assertSecretKey('cancelSubscription');
+    return this.request<Subscription>(
+      `/subscriptions/${subscriptionId}/cancel`,
+      {
+        method: 'POST',
+        body: JSON.stringify(params ?? {}),
+      },
+    );
+  }
+
+  /**
+   * Pauses an active subscription. No charges will be created while paused.
+   *
+   * @param subscriptionId - The subscription ID
+   * @param params - Pause options (optional auto-resume date)
+   * @returns The paused subscription
+   *
+   * @example
+   * ```typescript
+   * // Pause indefinitely
+   * await drip.pauseSubscription('sub_abc123');
+   *
+   * // Pause with auto-resume
+   * await drip.pauseSubscription('sub_abc123', {
+   *   resumeDate: '2026-04-01T00:00:00Z',
+   * });
+   * ```
+   */
+  async pauseSubscription(
+    subscriptionId: string,
+    params?: PauseSubscriptionParams,
+  ): Promise<Subscription> {
+    this.assertSecretKey('pauseSubscription');
+    return this.request<Subscription>(
+      `/subscriptions/${subscriptionId}/pause`,
+      {
+        method: 'POST',
+        body: JSON.stringify(params ?? {}),
+      },
+    );
+  }
+
+  /**
+   * Resumes a paused subscription. Starts a new billing period.
+   *
+   * @param subscriptionId - The subscription ID
+   * @returns The resumed subscription
+   *
+   * @example
+   * ```typescript
+   * const sub = await drip.resumeSubscription('sub_abc123');
+   * console.log(`Resumed, next billing: ${sub.currentPeriodEnd}`);
+   * ```
+   */
+  async resumeSubscription(subscriptionId: string): Promise<Subscription> {
+    this.assertSecretKey('resumeSubscription');
+    return this.request<Subscription>(
+      `/subscriptions/${subscriptionId}/resume`,
       { method: 'POST' },
     );
   }
@@ -2467,9 +3452,16 @@ export class Drip {
     skipped: number;
     events: Array<{ id: string; eventType: string; isDuplicate: boolean; skipped?: boolean; reason?: string }>;
   }> {
+    // Auto-generate deterministic idempotencyKey for any event that doesn't have one.
+    // Uses the same deterministic helper as emitEvent() — no Date.now() or Math.random().
+    const normalized = events.map((e) => ({
+      ...e,
+      idempotencyKey: e.idempotencyKey
+        ?? deterministicIdempotencyKey('evt', e.runId, e.customerId, e.eventType, e.quantity),
+    }));
     return this.request('/run-events/batch', {
       method: 'POST',
-      body: JSON.stringify({ events }),
+      body: JSON.stringify({ events: normalized }),
     });
   }
 
@@ -2571,7 +3563,7 @@ export class Drip {
       ? params.periodEnd.toISOString()
       : params.periodEnd;
 
-    return this.request<CostEstimateResponse>('/dashboard/cost-estimate/from-usage', {
+    return this.request<CostEstimateResponse>('/cost-estimate/from-usage', {
       method: 'POST',
       body: JSON.stringify({
         customerId: params.customerId,
@@ -2627,7 +3619,7 @@ export class Drip {
    * ```
    */
   async estimateFromHypothetical(params: EstimateFromHypotheticalParams): Promise<CostEstimateResponse> {
-    return this.request<CostEstimateResponse>('/dashboard/cost-estimate/hypothetical', {
+    return this.request<CostEstimateResponse>('/cost-estimate/hypothetical', {
       method: 'POST',
       body: JSON.stringify({
         items: params.items,
@@ -3132,6 +4124,71 @@ export class Drip {
    */
   createStreamMeter(options: StreamMeterOptions): StreamMeter {
     return new StreamMeter(this.charge.bind(this), options);
+  }
+
+  // ==========================================================================
+  // Portal Session Methods
+  // ==========================================================================
+
+  /**
+   * Creates a portal session for a customer.
+   *
+   * Portal sessions generate a token that lets your customer access a
+   * read-only dashboard showing their balance, charges, session keys,
+   * and settlement history — without needing a wallet connection.
+   *
+   * Send the returned `url` to your customer (email, in-app link, etc.).
+   *
+   * Requires a secret key (sk_).
+   *
+   * @param params - Portal session configuration
+   * @returns The created session with token and URL
+   *
+   * @example
+   * ```typescript
+   * const session = await drip.createPortalSession({
+   *   customerId: 'cust_abc123',
+   *   expiresInMinutes: 120, // 2 hours (default: 60)
+   * });
+   *
+   * // Send this URL to your customer
+   * console.log(session.url); // "/portal/abc..."
+   *
+   * // Or construct a full URL
+   * const fullUrl = `https://app.drippay.dev${session.url}`;
+   * ```
+   */
+  async createPortalSession(
+    params: CreatePortalSessionParams,
+  ): Promise<PortalSession> {
+    this.assertSecretKey('createPortalSession()');
+    return this.request<PortalSession>('/portal-sessions', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Revokes a portal session, immediately invalidating the token.
+   *
+   * Use this when a customer should no longer have portal access
+   * (e.g. account deactivated, token compromised).
+   *
+   * Requires a secret key (sk_).
+   *
+   * @param sessionId - The portal session ID to revoke
+   *
+   * @example
+   * ```typescript
+   * await drip.revokePortalSession('ps_abc123');
+   * // Token is now invalid — customer sees "link expired" error
+   * ```
+   */
+  async revokePortalSession(sessionId: string): Promise<{ success: boolean }> {
+    this.assertSecretKey('revokePortalSession()');
+    return this.request<{ success: boolean }>(`/portal-sessions/${sessionId}`, {
+      method: 'DELETE',
+    });
   }
 }
 
