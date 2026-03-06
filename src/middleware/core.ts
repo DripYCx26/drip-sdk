@@ -6,7 +6,7 @@
  * and x402 payment flow orchestration.
  */
 
-import { randomBytes } from 'crypto';
+import { createHash as cryptoCreateHash, randomBytes } from 'crypto';
 import { Drip, DripError, type ChargeResult } from '../index.js';
 import type {
   WithDripConfig,
@@ -241,8 +241,7 @@ export function generatePaymentRequest(params: {
  * In production, the server will use keccak256.
  */
 function hashString(input: string): string {
-  const { createHash } = require('crypto') as typeof import('crypto');
-  const hash = createHash('sha256').update(input).digest('hex');
+  const hash = cryptoCreateHash('sha256').update(input).digest('hex');
   return `0x${hash}`;
 }
 

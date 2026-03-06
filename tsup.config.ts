@@ -19,6 +19,5 @@ export default defineConfig({
   treeshake: true,
   target: 'node18',
   outDir: 'dist',
-  shims: true,
-  cjsInterop: true,
+  external: ['crypto'],
 });

@@ -8,6 +8,7 @@
  * @packageDocumentation
  */
 
+import { createHash, createHmac, timingSafeEqual, webcrypto } from 'crypto';
 import { StreamMeter, type StreamMeterOptions } from './stream-meter.js';
 import { deterministicIdempotencyKey } from './idempotency.js';
 import {
@@ -1901,9 +1902,6 @@ export class Drip {
    * ```
    */
   constructor(config: DripConfig = {}) {
-    // Auto-load .env files if dotenv is installed
-    try { require('dotenv').config(); } catch { /* dotenv not installed, skip */ }
-
     // Read from config or fall back to environment variables
     const apiKey = config.apiKey ?? (typeof process !== 'undefined' ? process.env.DRIP_API_KEY : undefined);
     const baseUrl = config.baseUrl ?? (typeof process !== 'undefined' ? (process.env.DRIP_API_URL ?? process.env.DRIP_BASE_URL) : undefined);
@@ -3832,8 +3830,7 @@ export class Drip {
     ];
 
     const str = components.join('|');
-    const crypto = require('crypto') as typeof import('crypto');
-    const hash = crypto.createHash('sha256').update(str).digest('hex').slice(0, 32);
+    const hash = createHash('sha256').update(str).digest('hex').slice(0, 32);
 
     return `drip_${hash}_${params.stepName.slice(0, 16)}`;
   }
@@ -3911,8 +3908,7 @@ export class Drip {
 
       // Get the subtle crypto API - use globalThis.crypto for browsers/edge runtimes,
       // or fall back to Node.js webcrypto for Node.js 18+
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const subtle = globalThis.crypto?.subtle ?? (require('crypto') as typeof import('crypto')).webcrypto.subtle;
+      const subtle = globalThis.crypto?.subtle ?? webcrypto.subtle;
 
       // Import the secret as an HMAC key
       const cryptoKey = await subtle.importKey(
@@ -4012,14 +4008,9 @@ export class Drip {
         return false;
       }
 
-      // Dynamic import to avoid bundling issues in edge runtimes
-      // eslint-disable-next-line @typescript-eslint/no-require-imports
-      const crypto = require('crypto') as typeof import('crypto');
-
       // Compute expected signature using timestamp.payload format
       const signaturePayload = `${timestamp}.${payload}`;
-      const expectedSignature = crypto
-        .createHmac('sha256', secret)
+      const expectedSignature = createHmac('sha256', secret)
         .update(signaturePayload)
         .digest('hex');
 
@@ -4031,7 +4022,7 @@ export class Drip {
         return false;
       }
 
-      return crypto.timingSafeEqual(sigBuffer, expectedBuffer);
+      return timingSafeEqual(sigBuffer, expectedBuffer);
     } catch {
       return false;
     }
@@ -4063,13 +4054,9 @@ export class Drip {
     secret: string,
     timestamp?: number,
   ): string {
-    // eslint-disable-next-line @typescript-eslint/no-require-imports
-    const crypto = require('crypto') as typeof import('crypto');
-
     const ts = timestamp ?? Math.floor(Date.now() / 1000);
     const signaturePayload = `${ts}.${payload}`;
-    const signature = crypto
-      .createHmac('sha256', secret)
+    const signature = createHmac('sha256', secret)
       .update(signaturePayload)
       .digest('hex');
 

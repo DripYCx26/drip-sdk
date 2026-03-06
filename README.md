@@ -32,16 +32,20 @@ export DRIP_API_KEY=pk_test_...
 Or use a `.env` file (recommended):
 
 ```bash
-npm install dotenv    # optional — SDK auto-loads .env when dotenv is installed
+npm install dotenv
 ```
 
 ```env
 # .env
 DRIP_API_KEY=sk_test_...
-DRIP_API_URL=https://api.drippay.dev/v1  # optional
+DRIP_API_URL=https://api.drippay.dev  # optional, defaults to this
 ```
 
-The SDK auto-loads `.env` files when `dotenv` is installed — no extra code needed.
+Load your `.env` at the top of your entry file:
+
+```typescript
+import 'dotenv/config';
+```
 
 ### 3. Create a customer and track usage
 
