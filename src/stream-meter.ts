@@ -214,28 +214,34 @@ export class StreamMeter {
       : deterministicIdempotencyKey('stream', this._options.customerId, this._options.meter, quantity, this._flushCount);
 
     // Charge the customer
-    const chargeResult = await this._chargeFn({
-      customerId: this._options.customerId,
-      meter: this._options.meter,
-      quantity,
-      idempotencyKey,
-      metadata: this._options.metadata,
-    });
+    try {
+      const chargeResult = await this._chargeFn({
+        customerId: this._options.customerId,
+        meter: this._options.meter,
+        quantity,
+        idempotencyKey,
+        metadata: this._options.metadata,
+      });
 
-    this._flushed = true;
-    this._flushCount++;
+      this._flushed = true;
+      this._flushCount++;
 
-    const result: StreamMeterFlushResult = {
-      success: chargeResult.success,
-      quantity,
-      charge: chargeResult.charge,
-      isDuplicate: chargeResult.isDuplicate,
-    };
+      const result: StreamMeterFlushResult = {
+        success: chargeResult.success,
+        quantity,
+        charge: chargeResult.charge,
+        isDuplicate: chargeResult.isDuplicate,
+      };
 
-    // Invoke callback if provided
-    this._options.onFlush?.(result);
+      // Invoke callback if provided
+      this._options.onFlush?.(result);
 
-    return result;
+      return result;
+    } catch (error) {
+      // Restore usage total so it can be retried on the next flush
+      this._total += quantity;
+      throw error;
+    }
   }
 
   /**

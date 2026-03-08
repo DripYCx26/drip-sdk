@@ -36,6 +36,7 @@ import { DripMiddlewareError } from './types.js';
 import {
   processRequest,
   hasPaymentProof,
+  BILLING_IDENTITY_HEADERS,
 } from './core.js';
 
 // ============================================================================
@@ -209,12 +210,18 @@ export function dripMiddleware(config: ExpressDripConfig): ExpressMiddleware {
   const attachToRequest = config.attachToRequest ?? true;
 
   return async (req, res, next) => {
-    // Convert Express request to generic format
+    // Convert Express request to generic format, stripping billing identity
+    // headers to prevent accidental use in customer resolvers.
+    const normalized = normalizeHeaders(req.headers);
+    for (const header of BILLING_IDENTITY_HEADERS) {
+      delete normalized[header];
+    }
     const genericRequest = {
       method: req.method,
       url: req.originalUrl || req.url,
-      headers: normalizeHeaders(req.headers),
+      headers: normalized,
       query: req.query as Record<string, string | undefined>,
+      body: req.body,
     };
 
     // Resolve quantity if it's a function (needs access to original request)
@@ -223,14 +230,9 @@ export function dripMiddleware(config: ExpressDripConfig): ExpressMiddleware {
       : config.quantity;
 
     // Resolve customer ID if it's a function - wrap to use generic request
-    let resolvedCustomerResolver: 'header' | 'query' | ((r: GenericRequest) => string | Promise<string>) | undefined;
-    if (typeof config.customerResolver === 'function') {
-      // Capture the original resolver and call it with the original request
-      const originalResolver = config.customerResolver;
-      resolvedCustomerResolver = async () => originalResolver(req);
-    } else {
-      resolvedCustomerResolver = config.customerResolver;
-    }
+    let resolvedCustomerResolver: ((r: GenericRequest) => string | Promise<string>);
+    const originalResolver = config.customerResolver;
+    resolvedCustomerResolver = async () => originalResolver(req);
 
     // Resolve idempotencyKey if it's a function
     let resolvedIdempotencyKey: ((r: GenericRequest) => string | Promise<string>) | undefined;

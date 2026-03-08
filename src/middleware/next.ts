@@ -32,6 +32,7 @@ import {
   processRequest,
   getHeader,
   hasPaymentProof,
+  BILLING_IDENTITY_HEADERS,
 } from './core.js';
 
 // ============================================================================
@@ -207,14 +208,37 @@ export function withDrip(
   handler: DripRouteHandler,
 ): NextRouteHandler {
   return async (request, routeContext) => {
-    // Convert Next.js request to generic format
+    // Read the request body for idempotency key generation.
+    // Clone first since NextRequest body streams can only be read once.
+    let requestBody: unknown;
+    try {
+      const cloned = request.clone();
+      const bodyText = await cloned.text();
+      if (bodyText) {
+        try {
+          requestBody = JSON.parse(bodyText);
+        } catch {
+          requestBody = bodyText;
+        }
+      }
+    } catch {
+      // Body may not be available (e.g., GET requests) — leave undefined
+    }
+
+    // Convert Next.js request to generic format, stripping billing identity
+    // headers to prevent accidental use in customer resolvers.
+    const headers = headersToObject(request.headers);
+    for (const header of BILLING_IDENTITY_HEADERS) {
+      delete headers[header];
+    }
     const genericRequest = {
       method: request.method,
       url: request.url,
-      headers: headersToObject(request.headers),
+      headers,
       query: request.nextUrl
         ? searchParamsToObject(request.nextUrl.searchParams)
         : {},
+      body: requestBody,
     };
 
     // Resolve quantity if it's a function (needs access to original request)
@@ -222,15 +246,10 @@ export function withDrip(
       ? await config.quantity(request)
       : config.quantity;
 
-    // Resolve customer ID if it's a function - wrap to use generic request
-    let resolvedCustomerResolver: 'header' | 'query' | ((req: GenericRequest) => string | Promise<string>) | undefined;
-    if (typeof config.customerResolver === 'function') {
-      // Capture the original resolver and call it with the original request
-      const originalResolver = config.customerResolver;
-      resolvedCustomerResolver = async () => originalResolver(request);
-    } else {
-      resolvedCustomerResolver = config.customerResolver;
-    }
+    // Wrap the customer resolver to use the original Next.js request
+    let resolvedCustomerResolver: ((req: GenericRequest) => string | Promise<string>);
+    const originalResolver = config.customerResolver;
+    resolvedCustomerResolver = async () => originalResolver(request);
 
     // Resolve idempotencyKey if it's a function
     let resolvedIdempotencyKey: ((req: GenericRequest) => string | Promise<string>) | undefined;

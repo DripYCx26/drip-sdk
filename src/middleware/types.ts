@@ -41,16 +41,11 @@ export interface WithDripConfig<TRequest = unknown> {
   baseUrl?: string;
 
   /**
-   * How to identify the customer from the request.
-   * - 'header': Look for X-Drip-Customer-Id header
-   * - 'query': Look for drip_customer_id query parameter
-   * - function: Custom extraction logic
-   * @default 'header'
+   * A function that resolves the customer ID from a verified authentication
+   * source (e.g., session token, JWT). Must be explicitly provided.
+   * Trusting unauthenticated client headers or query parameters is insecure.
    */
-  customerResolver?:
-    | 'header'
-    | 'query'
-    | ((request: TRequest) => string | Promise<string>);
+  customerResolver: (request: TRequest) => string | Promise<string>;
 
   /**
    * Custom idempotency key generator.

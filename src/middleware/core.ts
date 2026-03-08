@@ -304,55 +304,50 @@ function sanitizeChargeMetadata<TRequest>(
 // ============================================================================
 
 /**
+ * Headers that carry billing identity and MUST NOT be trusted from clients.
+ * These are stripped from generic requests to prevent accidental use in resolvers.
+ */
+export const BILLING_IDENTITY_HEADERS = [
+  'x-drip-customer-id',
+  'x-customer-id',
+] as const;
+
+/**
  * Resolve customer ID from a request based on configuration.
+ *
+ * Security: The resolver must derive the customer ID from a verified
+ * authentication source (e.g., session token, JWT, API key lookup).
+ * Never trust raw client-supplied headers or query parameters.
  */
 export async function resolveCustomerId<TRequest extends GenericRequest>(
   request: TRequest,
   config: WithDripConfig<TRequest>,
 ): Promise<string> {
-  const resolver = config.customerResolver ?? 'header';
+  const resolver = config.customerResolver;
 
-  if (typeof resolver === 'function') {
-    return resolver(request);
+  if (typeof resolver !== 'function') {
+    throw new DripMiddlewareError(
+      'customerResolver must be a function that resolves the customer ID ' +
+      'from a verified authentication source (e.g., session token, JWT). ' +
+      'Trusting unauthenticated client headers or query parameters is insecure.',
+      'CONFIGURATION_ERROR',
+      500,
+    );
   }
 
-  if (resolver === 'header') {
-    const customerId =
-      getHeader(request.headers, 'x-drip-customer-id') ??
-      getHeader(request.headers, 'x-customer-id');
+  const customerId = await resolver(request);
 
-    if (!customerId) {
-      throw new DripMiddlewareError(
-        'Missing customer ID. Include X-Drip-Customer-Id header.',
-        'CUSTOMER_RESOLUTION_FAILED',
-        400,
-      );
-    }
-
-    return customerId;
+  // Validate the resolved customer ID
+  if (typeof customerId !== 'string' || customerId.trim().length === 0) {
+    throw new DripMiddlewareError(
+      'customerResolver returned an empty or invalid customer ID. ' +
+      'The resolver must return a non-empty string from a verified source.',
+      'CUSTOMER_RESOLUTION_FAILED',
+      400,
+    );
   }
 
-  if (resolver === 'query') {
-    const query = request.query ?? {};
-    const customerId = query['drip_customer_id'] ?? query['customer_id'];
-    const id = Array.isArray(customerId) ? customerId[0] : customerId;
-
-    if (!id) {
-      throw new DripMiddlewareError(
-        'Missing customer ID. Include drip_customer_id query parameter.',
-        'CUSTOMER_RESOLUTION_FAILED',
-        400,
-      );
-    }
-
-    return id;
-  }
-
-  throw new DripMiddlewareError(
-    `Invalid customer resolver: ${resolver as string}`,
-    'CONFIGURATION_ERROR',
-    500,
-  );
+  return customerId.trim();
 }
 
 /**

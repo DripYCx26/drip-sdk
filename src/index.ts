@@ -684,7 +684,10 @@ export type WebhookEventType =
   | 'subscription.paused'
   | 'subscription.resumed'
   | 'subscription.trial_ended'
-  | 'subscription.payment_failed';
+  | 'subscription.payment_failed'
+  | 'withdrawal.created'
+  | 'withdrawal.completed'
+  | 'withdrawal.failed';
 
 /**
  * Per-endpoint routing filters for webhooks.
@@ -902,6 +905,88 @@ export interface CheckoutResult {
 
   /** Amount in USD */
   amountUsd: number;
+}
+
+// ============================================================================
+// Withdrawal Types (Fiat Off-Ramp)
+// ============================================================================
+
+/** Status of a withdrawal. */
+export type WithdrawalStatus =
+  | 'PENDING'
+  | 'ONCHAIN_PENDING'
+  | 'ONCHAIN_CONFIRMED'
+  | 'OFFRAMP_PENDING'
+  | 'OFFRAMP_PROCESSING'
+  | 'COMPLETE'
+  | 'FAILED'
+  | 'CANCELLED';
+
+/**
+ * Parameters for creating a withdrawal (USDC → fiat).
+ */
+export interface WithdrawParams {
+  /**
+   * Amount in USDC to withdraw (e.g., "100.00").
+   * Minimum: $10.00
+   * Maximum: $100,000.00
+   */
+  amountUsdc: string;
+
+  /**
+   * Idempotency key to safely retry requests.
+   */
+  idempotencyKey: string;
+
+  /**
+   * Optional bank description for display (e.g., "Chase ****1234").
+   */
+  bankDescription?: string;
+}
+
+/**
+ * Result of creating a withdrawal.
+ */
+export interface WithdrawalResult {
+  /** Withdrawal ID */
+  id: string;
+
+  /** Current status */
+  status: WithdrawalStatus;
+
+  /** Gross withdrawal amount in USDC */
+  amountUsdc: string;
+
+  /** Off-ramp fee in USDC (~1% for ACH) */
+  feeUsdc: string;
+
+  /** Net amount after fee (what merchant receives in fiat) */
+  netAmountUsdc: string;
+
+  /** Fiat currency (default: USD) */
+  fiatCurrency: string;
+
+  /** Bank description (e.g., "Chase ****1234") */
+  bankDescription: string | null;
+
+  /** ISO timestamp when withdrawal was created */
+  createdAt: string;
+
+  /** ISO timestamp when withdrawal completed (null if pending) */
+  completedAt: string | null;
+}
+
+/**
+ * Result of a fee estimate.
+ */
+export interface WithdrawalFeeEstimate {
+  amountUsdc: string;
+  feeUsdc: string;
+  netAmountUsdc: string;
+  feeBps: number;
+  feePercent: string;
+  method: string;
+  estimatedArrival: string;
 }
 
 // ============================================================================
@@ -2885,6 +2970,164 @@ export class Drip {
       expiresAt: response.expires_at,
       amountUsd: response.amount_usd,
     };
+  }
+
+  // ==========================================================================
+  // Withdrawal Methods (Fiat Off-Ramp)
+  // ==========================================================================
+
+  /**
+   * Creates a withdrawal to convert USDC to fiat (bank transfer).
+   *
+   * **Fee:** ~1% for ACH (deducted from withdrawal amount).
+   * Drip does not take a cut — fee goes to the off-ramp provider.
+   *
+   * **Flow:**
+   * 1. USDC withdrawn from your settlement balance
+   * 2. Converted to fiat via Infinite
+   * 3. ACH to your bank account (1-3 business days)
+   *
+   * @param params - Withdrawal parameters
+   * @returns Withdrawal details with fee breakdown
+   *
+   * @example
+   * ```typescript
+   * const withdrawal = await drip.withdraw({
+   *   amountUsdc: '500.00',
+   *   idempotencyKey: 'withdraw_2024_q1',
+   * });
+   * console.log(withdrawal.netAmountUsdc); // "495.00" (after 1% fee)
+   * ```
+   */
+  async withdraw(params: WithdrawParams): Promise<WithdrawalResult> {
+    const response = await this.request<{
+      id: string;
+      status: string;
+      amount_usdc: string;
+      fee_usdc: string;
+      net_amount_usdc: string;
+      fiat_currency: string;
+      bank_description: string | null;
+      created_at: string;
+      completed_at: string | null;
+    }>('/withdrawals', {
+      method: 'POST',
+      body: JSON.stringify({
+        amount_usdc: params.amountUsdc,
+        idempotency_key: params.idempotencyKey,
+        bank_description: params.bankDescription,
+      }),
+    });
+
+    return {
+      id: response.id,
+      status: response.status as WithdrawalStatus,
+      amountUsdc: response.amount_usdc,
+      feeUsdc: response.fee_usdc,
+      netAmountUsdc: response.net_amount_usdc,
+      fiatCurrency: response.fiat_currency,
+      bankDescription: response.bank_description,
+      createdAt: response.created_at,
+      completedAt: response.completed_at,
+    };
+  }
+
+  /**
+   * Lists withdrawals for the authenticated business.
+   *
+   * @param options - Filter and pagination options
+   * @returns Array of withdrawals with total count
+   */
+  async listWithdrawals(options: {
+    status?: WithdrawalStatus;
+    limit?: number;
+    offset?: number;
+  } = {}): Promise<{ withdrawals: WithdrawalResult[]; total: number }> {
+    const params = new URLSearchParams();
+    if (options.status) params.set('status', options.status);
+    if (options.limit !== undefined) params.set('limit', options.limit.toString());
+    if (options.offset !== undefined) params.set('offset', options.offset.toString());
+
+    const qs = params.toString();
+    const response = await this.request<{
+      withdrawals: Array<{
+        id: string;
+        status: string;
+        amount_usdc: string;
+        fee_usdc: string;
+        net_amount_usdc: string;
+        fiat_currency: string;
+        bank_description: string | null;
+        created_at: string;
+        completed_at: string | null;
+      }>;
+      total: number;
+    }>(`/withdrawals${qs ? `?${qs}` : ''}`);
+
+    return {
+      withdrawals: response.withdrawals.map((w) => ({
+        id: w.id,
+        status: w.status as WithdrawalStatus,
+        amountUsdc: w.amount_usdc,
+        feeUsdc: w.fee_usdc,
+        netAmountUsdc: w.net_amount_usdc,
+        fiatCurrency: w.fiat_currency,
+        bankDescription: w.bank_description,
+        createdAt: w.created_at,
+        completedAt: w.completed_at,
+      })),
+      total: response.total,
+    };
+  }
+
+  /**
+   * Gets a withdrawal fee estimate for a given amount.
+   *
+   * @param amountUsdc - Amount to withdraw
+   * @returns Fee breakdown and estimated arrival time
+   *
+   * @example
+   * ```typescript
+   * const estimate = await drip.estimateWithdrawalFee('1000.00');
+   * console.log(estimate.feeUsdc); // "10.00" (1%)
+   * console.log(estimate.estimatedArrival); // "1-3 business days"
+   * ```
+   */
+  async estimateWithdrawalFee(amountUsdc: string): Promise<WithdrawalFeeEstimate> {
+    const response = await this.request<{
+      amount_usdc: string;
+      fee_usdc: string;
+      net_amount_usdc: string;
+      fee_bps: number;
+      fee_percent: string;
+      method: string;
+      estimated_arrival: string;
+    }>(`/withdrawals/fee-estimate?amount_usdc=${encodeURIComponent(amountUsdc)}`);
+
+    return {
+      amountUsdc: response.amount_usdc,
+      feeUsdc: response.fee_usdc,
+      netAmountUsdc: response.net_amount_usdc,
+      feeBps: response.fee_bps,
+      feePercent: response.fee_percent,
+      method: response.method,
+      estimatedArrival: response.estimated_arrival,
+    };
+  }
+
+  /**
+   * Cancels a pending withdrawal.
+   *
+   * Only works if the withdrawal is still in PENDING status
+   * (before on-chain processing begins).
+   *
+   * @param withdrawalId - The withdrawal ID to cancel
+   */
+  async cancelWithdrawal(withdrawalId: string): Promise<{ id: string; status: string; cancelled: boolean }> {
+    return this.request<{ id: string; status: string; cancelled: boolean }>(
+      `/withdrawals/${withdrawalId}`,
+      { method: 'DELETE' },
+    );
   }
 
   // ==========================================================================

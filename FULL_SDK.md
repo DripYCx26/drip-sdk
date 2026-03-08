@@ -552,6 +552,11 @@ import { withDrip } from '@drip-sdk/node/next';
 export const POST = withDrip({
   meter: 'api_calls',
   quantity: 1,
+  customerResolver: async (request) => {
+    // Resolve from your auth system (e.g., JWT, session)
+    const session = await verifySession(request);
+    return session.dripCustomerId;
+  },
 }, async (req, { customerId }) => {
   return Response.json({ result: 'success' });
 });
@@ -565,6 +570,10 @@ import { dripMiddleware } from '@drip-sdk/node/express';
 app.use('/api', dripMiddleware({
   meter: 'api_calls',
   quantity: 1,
+  customerResolver: (req) => {
+    // Resolve from your auth system (e.g., JWT, session, API key)
+    return req.user.dripCustomerId;
+  },
 }));
 ```
 
