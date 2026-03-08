@@ -118,12 +118,12 @@
   ],
   "repository": {
     "type": "git",
-    "url": "https://github.com/MichaelLevin5908/drip-sdk.git"
+    "url": "https://github.com/DripYCx26/drip-sdk.git"
   },
   "bugs": {
-    "url": "https://github.com/MichaelLevin5908/drip-sdk/issues"
+    "url": "https://github.com/DripYCx26/drip-sdk/issues"
   },
-  "homepage": "https://github.com/MichaelLevin5908/drip-sdk#readme",
+  "homepage": "https://github.com/DripYCx26/drip-sdk#readme",
   "engines": {
     "node": ">=18.0.0"
   },
