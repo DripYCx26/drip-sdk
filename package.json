@@ -1,6 +1,6 @@
 {
   "name": "@drip-sdk/node",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Official Node.js SDK for Drip - Usage-based billing for AI agents",
   "author": "Drip Team",
   "license": "MIT",
