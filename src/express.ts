@@ -13,6 +13,7 @@
  * app.use('/api/paid', dripMiddleware({
  *   meter: 'api_calls',
  *   quantity: 1,
+ *   customerResolver: (req) => req.user.dripCustomerId,
  * }));
  *
  * app.post('/api/paid/generate', (req, res) => {

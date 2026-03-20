@@ -32,8 +32,9 @@ export interface DripConfig {
    *
    * Supports both key types:
    * - **Secret keys** (`sk_live_...` / `sk_test_...`): Full access to all endpoints
-   * - **Public keys** (`pk_live_...` / `pk_test_...`): Safe for client-side use.
-   *   Can access usage tracking, customers, runs, and events.
+   * - **Public keys** (`pk_live_...` / `pk_test_...`): Safe for client-side use only
+   *   in browser-safe flows. They cannot access administrative billing endpoints
+   *   like customers or entitlement management.
    *
    * @example "sk_live_abc123..." or "pk_live_abc123..."
    */
@@ -147,6 +148,8 @@ export interface ListCustomersResponse {
 // Usage Tracking Types
 // ============================================================================
 
+export type TrackUsageMode = 'batch' | 'sync';
+
 /**
  * Parameters for tracking usage without billing.
  */
@@ -186,17 +189,23 @@ export interface TrackUsageParams {
    * Additional metadata to attach to this usage event.
    */
   metadata?: Record<string, unknown>;
+
+  /**
+   * Write mode for usage tracking.
+   *
+   * - `sync` (default): persist immediately via `/usage/internal`
+   * - `batch`: enqueue for high-throughput bulk persistence via
+   *   `/usage/internal/batch` and return immediately
+   */
+  mode?: TrackUsageMode;
 }
 
-/**
- * Result of tracking usage (no billing).
- */
-export interface TrackUsageResult {
+export type TrackUsageSyncParams = TrackUsageParams & { mode?: 'sync' };
+export type TrackUsageBatchParams = Omit<TrackUsageParams, 'mode'> & { mode: 'batch' };
+
+interface BaseTrackUsageResult {
   /** Whether the usage was recorded */
   success: boolean;
-
-  /** The usage event ID */
-  usageEventId: string;
 
   /** Customer ID */
   customerId: string;
@@ -207,12 +216,45 @@ export interface TrackUsageResult {
   /** Quantity recorded */
   quantity: number;
 
-  /** Whether this customer is internal-only */
-  isInternal: boolean;
-
   /** Confirmation message */
   message: string;
 }
+
+/**
+ * Result of tracking usage synchronously (legacy/default behavior).
+ */
+export interface TrackUsageSyncResult extends BaseTrackUsageResult {
+  /** The usage event ID */
+  usageEventId: string;
+
+  /** Whether this customer is internal-only */
+  isInternal: boolean;
+}
+
+/**
+ * Result of tracking usage in batch mode.
+ */
+export interface TrackUsageBatchResult extends BaseTrackUsageResult {
+  /** Explicit batch mode marker */
+  mode: 'batch';
+
+  /** Whether this customer is internal-only, when returned by the API */
+  isInternal?: undefined;
+
+  /** Idempotency key for queued batch writes */
+  idempotencyKey: string;
+
+  /** Number of pending queued events for batch writes */
+  pendingEvents: number;
+
+  /** Not assigned until the event is flushed */
+  usageEventId?: undefined;
+}
+
+/**
+ * Result of tracking usage (no billing).
+ */
+export type TrackUsageResult = TrackUsageSyncResult | TrackUsageBatchResult;
 
 // ============================================================================
 // Run & Event Types (Execution Ledger)
@@ -722,6 +764,18 @@ export class Drip {
       );
     }
 
+    // Validate API key format early so typos are caught at construction time
+    if (!apiKey.startsWith('sk_') && !apiKey.startsWith('pk_')) {
+      throw new Error(
+        `Invalid API key format: key must start with "sk_" (secret) or "pk_" (public). Got "${apiKey.slice(0, 8)}..."`
+      );
+    }
+    if (apiKey.length < 10) {
+      throw new Error(
+        'Invalid API key: key is too short. Check that you copied the full key from the Drip dashboard.'
+      );
+    }
+
     this.apiKey = apiKey;
     this.baseUrl = baseUrl || 'https://api.drippay.dev/v1';
     this.timeout = config.timeout || 30000;
@@ -733,6 +787,21 @@ export class Drip {
       this.keyType = 'public';
     } else {
       this.keyType = 'unknown';
+    }
+  }
+
+  /**
+   * Asserts that the SDK was initialized with a secret key (sk_).
+   * @internal
+   */
+  private assertSecretKey(operation: string): void {
+    if (this.keyType === 'public') {
+      throw new DripError(
+        `${operation} requires a secret key (sk_). You are using a public key (pk_), which cannot access this endpoint. ` +
+        'Use a secret key for administrative billing, customer, and entitlement operations.',
+        403,
+        'PUBLIC_KEY_NOT_ALLOWED',
+      );
     }
   }
 
@@ -897,6 +966,7 @@ export class Drip {
    * ```
    */
   async createCustomer(params: CreateCustomerParams): Promise<Customer> {
+    this.assertSecretKey('createCustomer()');
     return this.request<Customer>('/customers', {
       method: 'POST',
       body: JSON.stringify(params),
@@ -911,6 +981,7 @@ export class Drip {
    * @throws {DripError} If customer not found (404)
    */
   async getCustomer(customerId: string): Promise<Customer> {
+    this.assertSecretKey('getCustomer()');
     return this.request<Customer>(`/customers/${customerId}`);
   }
 
@@ -923,6 +994,7 @@ export class Drip {
   async listCustomers(
     options?: ListCustomersOptions,
   ): Promise<ListCustomersResponse> {
+    this.assertSecretKey('listCustomers()');
     const params = new URLSearchParams();
 
     if (options?.limit) {
@@ -963,6 +1035,7 @@ export class Drip {
     customerId: string,
     params: SetSpendingCapParams,
   ): Promise<CustomerSpendingCap> {
+    this.assertSecretKey('setCustomerSpendingCap()');
     return this.request<CustomerSpendingCap>(
       `/customers/${customerId}/spending-cap`,
       { method: 'PUT', body: JSON.stringify(params) },
@@ -978,6 +1051,7 @@ export class Drip {
   async getCustomerSpendingCaps(
     customerId: string,
   ): Promise<{ caps: CustomerSpendingCap[] }> {
+    this.assertSecretKey('getCustomerSpendingCaps()');
     return this.request<{ caps: CustomerSpendingCap[] }>(
       `/customers/${customerId}/spending-caps`,
     );
@@ -993,6 +1067,7 @@ export class Drip {
     customerId: string,
     capId: string,
   ): Promise<{ success: boolean }> {
+    this.assertSecretKey('removeCustomerSpendingCap()');
     return this.request<{ success: boolean }>(
       `/customers/${customerId}/spending-caps/${capId}`,
       { method: 'DELETE' },
@@ -1025,14 +1100,22 @@ export class Drip {
    *   description: 'API calls during pilot',
    * });
    *
-   * console.log(`Tracked: ${result.usageEventId}`);
+   * if (result.mode === 'sync') {
+   *   console.log(`Tracked: ${result.usageEventId}`);
+   * } else {
+   *   console.log(`Queued with key: ${result.idempotencyKey}`);
+   * }
    * ```
    */
+  async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
+  async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
   async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
     const idempotencyKey = params.idempotencyKey
       ?? deterministicIdempotencyKey('track', params.customerId, params.meter, params.quantity);
+    const mode = params.mode ?? 'sync';
+    const path = mode === 'sync' ? '/usage/internal' : '/usage/internal/batch';
 
-    return this.request<TrackUsageResult>('/usage/internal', {
+    const result = await this.request<TrackUsageResult>(path, {
       method: 'POST',
       body: JSON.stringify({
         customerId: params.customerId,
@@ -1044,6 +1127,15 @@ export class Drip {
         metadata: params.metadata,
       }),
     });
+
+    if (mode === 'batch') {
+      return {
+        ...(result as TrackUsageBatchResult),
+        mode: 'batch',
+      };
+    }
+
+    return result as TrackUsageSyncResult;
   }
 
   // ==========================================================================
@@ -1392,6 +1484,7 @@ export class Drip {
    * ```
    */
   async checkEntitlement(params: CheckEntitlementParams): Promise<EntitlementCheckResult> {
+    this.assertSecretKey('checkEntitlement()');
     return this.request<EntitlementCheckResult>('/entitlements/check', {
       method: 'POST',
       body: JSON.stringify({

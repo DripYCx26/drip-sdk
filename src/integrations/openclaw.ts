@@ -109,7 +109,7 @@ export interface OpenClawBillingOptions {
   baseUrl?: string;
   customerId?: string;
   workflowId?: string;
-  usageEndpoint?: '/v1/usage' | '/v1/usage/async' | '/v1/usage/internal';
+  usageEndpoint?: '/v1/usage' | '/v1/usage/async' | '/v1/usage/internal' | '/v1/usage/internal/batch';
   usageType?: string;
   metadata?: Record<string, unknown>;
 }
@@ -198,7 +198,7 @@ export class OpenClawBilling {
   private readonly _baseUrl: string;
   private readonly _defaultCustomerId?: string;
   private readonly _defaultWorkflowId?: string;
-  private readonly _usageEndpoint: '/v1/usage' | '/v1/usage/async' | '/v1/usage/internal';
+  private readonly _usageEndpoint: '/v1/usage' | '/v1/usage/async' | '/v1/usage/internal' | '/v1/usage/internal/batch';
   private readonly _defaultUsageType: string;
   private readonly _baseMetadata: Record<string, unknown>;
 

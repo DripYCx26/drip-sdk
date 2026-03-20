@@ -11,6 +11,10 @@
  * export const POST = withDrip({
  *   meter: 'api_calls',
  *   quantity: 1,
+ *   customerResolver: async (req) => {
+ *     const session = await verifySession(req);
+ *     return session.dripCustomerId;
+ *   },
  * }, handler);
  * ```
  *
@@ -18,7 +22,11 @@
  * ```typescript
  * import { dripMiddleware } from '@drip-sdk/node/middleware';
  *
- * app.use('/api', dripMiddleware({ meter: 'api_calls', quantity: 1 }));
+ * app.use('/api', dripMiddleware({
+ *   meter: 'api_calls',
+ *   quantity: 1,
+ *   customerResolver: (req) => req.user.dripCustomerId,
+ * }));
  * ```
  *
  * @example Custom Adapter

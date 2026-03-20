@@ -10,6 +10,10 @@
  * export const POST = withDrip({
  *   meter: 'api_calls',
  *   quantity: 1,
+ *   customerResolver: async (req) => {
+ *     const session = await verifySession(req);
+ *     return session.dripCustomerId;
+ *   },
  * }, async (req, { charge }) => {
  *   return Response.json({ success: true });
  * });
@@ -22,6 +26,7 @@
  * app.use('/api/paid', dripMiddleware({
  *   meter: 'api_calls',
  *   quantity: 1,
+ *   customerResolver: (req) => req.user.dripCustomerId,
  * }));
  * ```
  */
@@ -51,6 +56,12 @@ export {
   generateIdempotencyKey,
   createDripClient,
   getHeader,
+  BILLING_IDENTITY_HEADERS,
+  BILLING_IDENTITY_QUERY_PARAMS,
+  stripBillingIdentityHeaders,
+  stripBillingIdentityQueryParams,
+  stripBillingIdentitySearchParams,
+  stripBillingIdentityQueryFromUrl,
 } from './core.js';
 
 // Next.js adapter

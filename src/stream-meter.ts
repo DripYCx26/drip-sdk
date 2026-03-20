@@ -101,6 +101,7 @@ export class StreamMeter {
   private _total: number = 0;
   private _flushed: boolean = false;
   private _flushCount: number = 0;
+  private _flushPromise: Promise<StreamMeterFlushResult> | null = null;
   private readonly _chargeFn: ChargeFn;
   private readonly _options: StreamMeterOptions;
 
@@ -157,6 +158,7 @@ export class StreamMeter {
 
     // Check for auto-flush threshold
     if (
+      !this._flushPromise &&
       this._options.flushThreshold !== undefined &&
       this._total >= this._options.flushThreshold
     ) {
@@ -187,15 +189,16 @@ export class StreamMeter {
    * Flush accumulated usage and charge the customer.
    *
    * If total is 0, returns a success result with no charge.
-   * After flush, the meter resets to 0 and can be reused.
+   * After a successful flush, the charged quantity is removed and the meter can be reused.
    *
    * @returns The flush result including charge details
    */
   async flush(): Promise<StreamMeterFlushResult> {
-    const quantity = this._total;
+    if (this._flushPromise) {
+      return this._flushPromise;
+    }
 
-    // Reset total before charging to avoid double-counting on retry
-    this._total = 0;
+    const quantity = this._total;
 
     // Nothing to charge
     if (quantity === 0) {
@@ -213,8 +216,14 @@ export class StreamMeter {
       ? `${this._options.idempotencyKey}_flush_${this._flushCount}`
       : deterministicIdempotencyKey('stream', this._options.customerId, this._options.meter, quantity, this._flushCount);
 
-    // Charge the customer
-    try {
+    // Increment flush count BEFORE the charge call so that retries
+    // get a new idempotency key. If we only incremented on success,
+    // a failed flush followed by a retry would reuse the same key
+    // and the backend would deduplicate it — silently losing the charge.
+    const flushIndex = this._flushCount;
+    this._flushCount++;
+
+    this._flushPromise = (async () => {
       const chargeResult = await this._chargeFn({
         customerId: this._options.customerId,
         meter: this._options.meter,
@@ -223,8 +232,14 @@ export class StreamMeter {
         metadata: this._options.metadata,
       });
 
+      if (!chargeResult.success) {
+        throw new Error('StreamMeter flush failed: charge was not accepted');
+      }
+
       this._flushed = true;
-      this._flushCount++;
+
+      // Preserve usage added while the charge was in flight.
+      this._total = Math.max(0, this._total - quantity);
 
       const result: StreamMeterFlushResult = {
         success: chargeResult.success,
@@ -237,10 +252,12 @@ export class StreamMeter {
       this._options.onFlush?.(result);
 
       return result;
-    } catch (error) {
-      // Restore usage total so it can be retried on the next flush
-      this._total += quantity;
-      throw error;
+    })();
+
+    try {
+      return await this._flushPromise;
+    } finally {
+      this._flushPromise = null;
     }
   }
 

@@ -15,6 +15,7 @@
  * app.use('/api/paid', dripMiddleware({
  *   meter: 'api_calls',
  *   quantity: 1,
+ *   customerResolver: (req) => req.user.dripCustomerId,
  * }));
  *
  * app.post('/api/paid/generate', (req, res) => {
@@ -36,7 +37,9 @@ import { DripMiddlewareError } from './types.js';
 import {
   processRequest,
   hasPaymentProof,
-  BILLING_IDENTITY_HEADERS,
+  stripBillingIdentityHeaders,
+  stripBillingIdentityQueryParams,
+  stripBillingIdentityQueryFromUrl,
 } from './core.js';
 
 // ============================================================================
@@ -128,6 +131,37 @@ function normalizeHeaders(
 }
 
 /**
+ * Present a resolver-safe request view with spoofable billing identity removed
+ * from headers, query params, and URL-bearing fields.
+ */
+function createSanitizedResolverRequest(
+  req: ExpressRequest,
+): ExpressRequest {
+  const sanitizedHeaders = stripBillingIdentityHeaders(req.headers);
+  const sanitizedQuery = stripBillingIdentityQueryParams(req.query);
+  const sanitizedUrl = stripBillingIdentityQueryFromUrl(req.url);
+  const sanitizedOriginalUrl = stripBillingIdentityQueryFromUrl(req.originalUrl);
+
+  return new Proxy(req, {
+    get(target, prop) {
+      if (prop === 'headers') {
+        return sanitizedHeaders;
+      }
+      if (prop === 'query') {
+        return sanitizedQuery;
+      }
+      if (prop === 'url') {
+        return sanitizedUrl;
+      }
+      if (prop === 'originalUrl') {
+        return sanitizedOriginalUrl;
+      }
+      return Reflect.get(target, prop);
+    },
+  });
+}
+
+/**
  * Send a 402 Payment Required response.
  */
 function sendPaymentRequired(
@@ -180,7 +214,7 @@ function sendError(
  * Express middleware for Drip billing.
  *
  * This middleware:
- * 1. Resolves the customer ID from headers or query
+ * 1. Resolves the customer ID with your explicit customerResolver
  * 2. Checks customer balance
  * 3. If insufficient, returns 402 with x402 payment headers
  * 4. If payment proof provided, verifies and processes
@@ -197,12 +231,14 @@ function sendError(
  * app.use('/api/paid', dripMiddleware({
  *   meter: 'api_calls',
  *   quantity: 1,
+ *   customerResolver: (req) => req.user.dripCustomerId,
  * }));
  *
  * // Or with dynamic quantity
  * app.use('/api/ai', dripMiddleware({
  *   meter: 'tokens',
  *   quantity: (req) => req.body?.maxTokens ?? 100,
+ *   customerResolver: (req) => req.user.dripCustomerId,
  * }));
  * ```
  */
@@ -211,18 +247,17 @@ export function dripMiddleware(config: ExpressDripConfig): ExpressMiddleware {
 
   return async (req, res, next) => {
     // Convert Express request to generic format, stripping billing identity
-    // headers to prevent accidental use in customer resolvers.
-    const normalized = normalizeHeaders(req.headers);
-    for (const header of BILLING_IDENTITY_HEADERS) {
-      delete normalized[header];
-    }
+    // headers and query params to prevent accidental use in customer resolvers.
+    const normalized = stripBillingIdentityHeaders(normalizeHeaders(req.headers));
+    const sanitizedQuery = stripBillingIdentityQueryParams(req.query);
     const genericRequest = {
       method: req.method,
-      url: req.originalUrl || req.url,
+      url: stripBillingIdentityQueryFromUrl(req.originalUrl || req.url),
       headers: normalized,
-      query: req.query as Record<string, string | undefined>,
+      query: sanitizedQuery,
       body: req.body,
     };
+    const resolverRequest = createSanitizedResolverRequest(req);
 
     // Resolve quantity if it's a function (needs access to original request)
     const resolvedQuantity = typeof config.quantity === 'function'
@@ -232,7 +267,11 @@ export function dripMiddleware(config: ExpressDripConfig): ExpressMiddleware {
     // Resolve customer ID if it's a function - wrap to use generic request
     let resolvedCustomerResolver: ((r: GenericRequest) => string | Promise<string>);
     const originalResolver = config.customerResolver;
-    resolvedCustomerResolver = async () => originalResolver(req);
+    if (typeof originalResolver === 'function') {
+      resolvedCustomerResolver = async () => originalResolver(resolverRequest);
+    } else {
+      resolvedCustomerResolver = originalResolver as unknown as (r: GenericRequest) => string | Promise<string>;
+    }
 
     // Resolve idempotencyKey if it's a function
     let resolvedIdempotencyKey: ((r: GenericRequest) => string | Promise<string>) | undefined;
@@ -335,6 +374,7 @@ export function dripMiddleware(config: ExpressDripConfig): ExpressMiddleware {
  * export const drip = createDripMiddleware({
  *   apiKey: process.env.DRIP_API_KEY,
  *   baseUrl: process.env.DRIP_API_URL,
+ *   customerResolver: (req) => req.user.dripCustomerId,
  * });
  *
  * // routes/api.ts

@@ -140,8 +140,9 @@ export interface DripConfig {
    *
    * Supports both key types:
    * - **Secret keys** (`sk_live_...` / `sk_test_...`): Full access to all endpoints
-   * - **Public keys** (`pk_live_...` / `pk_test_...`): Safe for client-side use.
-   *   Can access usage, customers, charges, sessions, analytics, etc.
+   * - **Public keys** (`pk_live_...` / `pk_test_...`): Safe for client-side use only
+   *   in browser-safe flows. They cannot access administrative billing endpoints
+   *   like customers, charges, events, pricing plans, subscriptions, or entitlement checks.
    *   Cannot access webhook management, API key management, or feature flags.
    *
    * @example "sk_live_abc123..." or "pk_live_abc123..."
@@ -165,10 +166,13 @@ export interface DripConfig {
    * Enable production resilience features (rate limiting, retry with backoff,
    * circuit breaker, metrics).
    *
-   * - `true`: Use default production settings (100 req/s, 3 retries)
+   * Enabled by default with production settings (100 req/s, 3 retries).
+   * Set to `false` to disable for testing or low-level control.
+   *
+   * - `true`/`undefined`: Use default production settings (100 req/s, 3 retries)
    * - `'high-throughput'`: Optimized for high throughput (1000 req/s, 2 retries)
    * - `ResilienceConfig`: Custom configuration object
-   * - `undefined`/`false`: Disabled (default for backward compatibility)
+   * - `false`: Disabled
    *
    * @example
    * ```typescript
@@ -413,6 +417,162 @@ export interface EntitlementCheckResult {
 }
 
 // ============================================================================
+// Entitlement Plan Types
+// ============================================================================
+
+/**
+ * Parameters for creating an entitlement plan.
+ */
+export interface CreateEntitlementPlanParams {
+  /** Plan name */
+  name: string;
+  /** Unique slug (lowercase alphanumeric, hyphens, underscores) */
+  slug: string;
+  /** Optional description */
+  description?: string;
+  /** Whether this is the default plan for new customers */
+  isDefault?: boolean;
+}
+
+/**
+ * An entitlement plan.
+ */
+export interface EntitlementPlan {
+  id: string;
+  name: string;
+  slug: string;
+  description: string | null;
+  isDefault: boolean;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Parameters for adding a feature rule to an entitlement plan.
+ */
+export interface CreateEntitlementRuleParams {
+  /** Feature key (e.g., "api_calls", "tokens") */
+  featureKey: string;
+  /** Type of limit */
+  limitType: 'COUNT' | 'AMOUNT';
+  /** Time period for the limit */
+  period: 'DAILY' | 'MONTHLY';
+  /** Numeric limit value */
+  limitValue: number;
+  /** If true, this feature has unlimited access */
+  unlimited?: boolean;
+}
+
+/**
+ * A feature rule within an entitlement plan.
+ */
+export interface EntitlementRule {
+  id: string;
+  planId: string;
+  featureKey: string;
+  limitType: 'COUNT' | 'AMOUNT';
+  period: 'DAILY' | 'MONTHLY';
+  limitValue: number;
+  unlimited: boolean;
+}
+
+/**
+ * Parameters for assigning an entitlement plan to a customer.
+ */
+export interface AssignEntitlementParams {
+  /** The entitlement plan ID to assign */
+  planId: string;
+  /** Optional per-customer overrides */
+  overrides?: Record<string, { limitValue?: number; unlimited?: boolean }>;
+}
+
+/**
+ * A customer's entitlement assignment including usage.
+ */
+export interface CustomerEntitlement {
+  planId: string;
+  planName: string;
+  planSlug: string;
+  rules: EntitlementRule[];
+  overrides: Record<string, { limitValue?: number; unlimited?: boolean }>;
+  usage: Record<string, { used: number; limit: number; remaining: number; period: string }>;
+}
+
+// ============================================================================
+// Contract Types
+// ============================================================================
+
+/**
+ * Parameters for creating a contract.
+ */
+export interface CreateContractParams {
+  /** The Drip customer ID */
+  customerId: string;
+  /** Contract name */
+  name: string;
+  /** Start date (ISO datetime) */
+  startDate: string;
+  /** End date (ISO datetime, optional) */
+  endDate?: string;
+  /** Minimum spend in USDC */
+  minimumUsdc?: string;
+  /** Maximum spend in USDC */
+  maximumUsdc?: string;
+  /** Volume discount percentage */
+  discountPct?: number;
+  /** Prepaid amount in USDC */
+  prepaidAmountUsdc?: string;
+  /** Whether unused prepaid balance rolls over */
+  prepaidRollover?: boolean;
+  /** Included units per usage type */
+  includedUnits?: Record<string, number>;
+  /** Arbitrary metadata */
+  metadata?: Record<string, unknown>;
+}
+
+/**
+ * A per-customer pricing contract.
+ */
+export interface Contract {
+  id: string;
+  customerId: string;
+  name: string;
+  status: 'ACTIVE' | 'EXPIRED' | 'CANCELLED';
+  startDate: string;
+  endDate: string | null;
+  minimumUsdc: string | null;
+  maximumUsdc: string | null;
+  discountPct: number | null;
+  prepaidAmountUsdc: string | null;
+  prepaidBalanceUsdc: string | null;
+  prepaidRollover: boolean;
+  includedUnits: Record<string, number> | null;
+  metadata: Record<string, unknown> | null;
+  overrides: ContractPriceOverride[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * A price override within a contract.
+ */
+export interface ContractPriceOverride {
+  unitType: string;
+  unitPriceUsdc: string;
+}
+
+/**
+ * Parameters for adding a price override to a contract.
+ */
+export interface CreateContractOverrideParams {
+  /** The usage unit type to override */
+  unitType: string;
+  /** The override price in USDC (e.g., "0.0005") */
+  unitPriceUsd: string;
+}
+
+// ============================================================================
 // Usage & Charge Types
 // ============================================================================
 
@@ -493,6 +653,8 @@ export type ChargeStatus =
   | 'FAILED'
   | 'REFUNDED';
 
+export type TrackUsageMode = 'batch' | 'sync';
+
 /**
  * Parameters for tracking usage without billing.
  * Use this for internal visibility, pilots, or pre-billing tracking.
@@ -533,17 +695,23 @@ export interface TrackUsageParams {
    * Additional metadata to attach to this usage event.
    */
   metadata?: Record<string, unknown>;
+
+  /**
+   * Write mode for usage tracking.
+   *
+   * - `sync` (default): persist immediately via `/usage/internal`
+   * - `batch`: enqueue for high-throughput bulk persistence via
+   *   `/usage/internal/batch` and return immediately
+   */
+  mode?: TrackUsageMode;
 }
 
-/**
- * Result of tracking usage (no billing).
- */
-export interface TrackUsageResult {
+export type TrackUsageSyncParams = TrackUsageParams & { mode?: 'sync' };
+export type TrackUsageBatchParams = Omit<TrackUsageParams, 'mode'> & { mode: 'batch' };
+
+interface BaseTrackUsageResult {
   /** Whether the usage was recorded */
   success: boolean;
-
-  /** The usage event ID */
-  usageEventId: string;
 
   /** Customer ID */
   customerId: string;
@@ -554,12 +722,45 @@ export interface TrackUsageResult {
   /** Quantity recorded */
   quantity: number;
 
-  /** Whether this customer is internal-only */
-  isInternal: boolean;
-
   /** Confirmation message */
   message: string;
 }
+
+/**
+ * Result of tracking usage synchronously (legacy/default behavior).
+ */
+export interface TrackUsageSyncResult extends BaseTrackUsageResult {
+  /** The usage event ID */
+  usageEventId: string;
+
+  /** Whether this customer is internal-only */
+  isInternal: boolean;
+}
+
+/**
+ * Result of tracking usage in batch mode.
+ */
+export interface TrackUsageBatchResult extends BaseTrackUsageResult {
+  /** Explicit batch mode marker */
+  mode: 'batch';
+
+  /** Whether this customer is internal-only, when returned by the API */
+  isInternal?: undefined;
+
+  /** Idempotency key for queued batch writes */
+  idempotencyKey: string;
+
+  /** Number of pending queued events for batch writes */
+  pendingEvents: number;
+
+  /** Not assigned until the event is flushed */
+  usageEventId?: undefined;
+}
+
+/**
+ * Result of tracking usage (no billing).
+ */
+export type TrackUsageResult = TrackUsageSyncResult | TrackUsageBatchResult;
 
 /**
  * A detailed charge record.
@@ -1997,6 +2198,18 @@ export class Drip {
       );
     }
 
+    // Validate API key format early so typos are caught at construction time
+    if (!apiKey.startsWith('sk_') && !apiKey.startsWith('pk_')) {
+      throw new Error(
+        `Invalid API key format: key must start with "sk_" (secret) or "pk_" (public). Got "${apiKey.slice(0, 8)}..."`
+      );
+    }
+    if (apiKey.length < 10) {
+      throw new Error(
+        'Invalid API key: key is too short. Check that you copied the full key from the Drip dashboard.'
+      );
+    }
+
     this.apiKey = apiKey;
     this.baseUrl = baseUrl || 'https://api.drippay.dev/v1';
     this.timeout = config.timeout || 30000;
@@ -2010,15 +2223,17 @@ export class Drip {
       this.keyType = 'unknown';
     }
 
-    // Setup resilience manager
-    if (config.resilience === true) {
-      this.resilience = new ResilienceManager(createDefaultResilienceConfig());
+    // Setup resilience manager — enabled by default for production safety.
+    // Explicit `false` disables it for testing or low-level control.
+    if (config.resilience === false) {
+      this.resilience = null;
     } else if (config.resilience === 'high-throughput') {
       this.resilience = new ResilienceManager(createHighThroughputResilienceConfig());
     } else if (config.resilience && typeof config.resilience === 'object') {
       this.resilience = new ResilienceManager(config.resilience);
     } else {
-      this.resilience = null;
+      // Default: enabled with standard config (resilience: true or undefined)
+      this.resilience = new ResilienceManager(createDefaultResilienceConfig());
     }
   }
 
@@ -2031,7 +2246,7 @@ export class Drip {
     if (this.keyType === 'public') {
       throw new DripError(
         `${operation} requires a secret key (sk_). You are using a public key (pk_), which cannot access this endpoint. ` +
-        `Use a secret key for webhook, API key, and feature flag management.`,
+        `Use a secret key for administrative billing, customer, pricing, subscription, and webhook operations.`,
         403,
         'PUBLIC_KEY_NOT_ALLOWED',
       );
@@ -2088,17 +2303,36 @@ export class Drip {
         return { success: true } as T;
       }
 
-      const data = await res.json();
-
-      if (!res.ok) {
+      let data: Record<string, unknown>;
+      try {
+        data = await res.json();
+      } catch {
+        // Response body is not valid JSON (e.g., HTML error page, empty body)
+        if (!res.ok) {
+          throw new DripError(
+            `Request failed with status ${res.status} (non-JSON response)`,
+            res.status,
+            'INVALID_RESPONSE',
+          );
+        }
         throw new DripError(
-          data.message || data.error || 'Request failed',
+          `Failed to parse JSON response from ${path}`,
           res.status,
-          data.code,
-          data,
+          'PARSE_ERROR',
         );
       }
 
+      if (!res.ok) {
+        const message = typeof data.message === 'string' ? data.message
+          : typeof data.error === 'string' ? data.error
+          : 'Request failed';
+        const code = typeof data.code === 'string' ? data.code : undefined;
+        throw new DripError(message, res.status, code, data);
+      }
+
+      // The generic T is the caller's expected shape. We trust the backend
+      // contract here — runtime validation belongs at the API boundary
+      // (backend Zod schemas), not in the SDK hot path.
       return data as T;
     } catch (error) {
       if (error instanceof DripError) {
@@ -2271,6 +2505,7 @@ export class Drip {
    * ```
    */
   async createCustomer(params: CreateCustomerParams): Promise<Customer> {
+    this.assertSecretKey('createCustomer()');
     return this.request<Customer>('/customers', {
       method: 'POST',
       body: JSON.stringify(params),
@@ -2291,6 +2526,7 @@ export class Drip {
    * ```
    */
   async getCustomer(customerId: string): Promise<Customer> {
+    this.assertSecretKey('getCustomer()');
     return this.request<Customer>(`/customers/${customerId}`);
   }
 
@@ -2315,6 +2551,7 @@ export class Drip {
   async listCustomers(
     options?: ListCustomersOptions,
   ): Promise<ListCustomersResponse> {
+    this.assertSecretKey('listCustomers()');
     const params = new URLSearchParams();
 
     if (options?.limit) {
@@ -2393,6 +2630,7 @@ export class Drip {
    * ```
    */
   async getBalance(customerId: string): Promise<BalanceResult> {
+    this.assertSecretKey('getBalance()');
     return this.request<BalanceResult>(`/customers/${customerId}/balance`);
   }
 
@@ -2425,6 +2663,7 @@ export class Drip {
     customerId: string,
     params: SetSpendingCapParams,
   ): Promise<CustomerSpendingCap> {
+    this.assertSecretKey('setCustomerSpendingCap()');
     return this.request<CustomerSpendingCap>(
       `/customers/${customerId}/spending-cap`,
       { method: 'PUT', body: JSON.stringify(params) },
@@ -2448,6 +2687,7 @@ export class Drip {
   async getCustomerSpendingCaps(
     customerId: string,
   ): Promise<{ caps: CustomerSpendingCap[] }> {
+    this.assertSecretKey('getCustomerSpendingCaps()');
     return this.request<{ caps: CustomerSpendingCap[] }>(
       `/customers/${customerId}/spending-caps`,
     );
@@ -2468,8 +2708,258 @@ export class Drip {
     customerId: string,
     capId: string,
   ): Promise<{ success: boolean }> {
+    this.assertSecretKey('removeCustomerSpendingCap()');
     return this.request<{ success: boolean }>(
       `/customers/${customerId}/spending-caps/${capId}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  // ==========================================================================
+  // Customer Provisioning Methods
+  // ==========================================================================
+
+  /**
+   * Provisions (or re-provisions) an ERC-4337 smart account for a customer.
+   * On testnet, auto-funds with USDC.
+   */
+  async provisionCustomer(customerId: string): Promise<Customer> {
+    this.assertSecretKey('provisionCustomer()');
+    return this.request<Customer>(
+      `/customers/${customerId}/provision`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+  }
+
+  /**
+   * Syncs a customer's on-chain balance from the blockchain.
+   */
+  async syncCustomerBalance(customerId: string): Promise<{ balance: string }> {
+    this.assertSecretKey('syncCustomerBalance()');
+    return this.request<{ balance: string }>(
+      `/customers/${customerId}/sync-balance`,
+      { method: 'POST', body: JSON.stringify({}) },
+    );
+  }
+
+  /**
+   * Assigns an entitlement plan to a customer with optional overrides.
+   */
+  async assignCustomerEntitlement(
+    customerId: string,
+    params: AssignEntitlementParams,
+  ): Promise<CustomerEntitlement> {
+    this.assertSecretKey('assignCustomerEntitlement()');
+    return this.request<CustomerEntitlement>(
+      `/customers/${customerId}/entitlement`,
+      { method: 'PUT', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Gets a customer's assigned entitlement plan and current usage.
+   */
+  async getCustomerEntitlement(customerId: string): Promise<CustomerEntitlement> {
+    this.assertSecretKey('getCustomerEntitlement()');
+    return this.request<CustomerEntitlement>(
+      `/customers/${customerId}/entitlement`,
+    );
+  }
+
+  // ==========================================================================
+  // Contract Methods
+  // ==========================================================================
+
+  /**
+   * Creates a per-customer pricing contract.
+   */
+  async createContract(params: CreateContractParams): Promise<Contract> {
+    this.assertSecretKey('createContract()');
+    return this.request<Contract>(
+      '/contracts',
+      { method: 'POST', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Lists contracts for your business.
+   */
+  async listContracts(options?: {
+    customerId?: string;
+    status?: 'ACTIVE' | 'EXPIRED' | 'CANCELLED';
+  }): Promise<{ contracts: Contract[] }> {
+    this.assertSecretKey('listContracts()');
+    const params = new URLSearchParams();
+    if (options?.customerId) params.set('customerId', options.customerId);
+    if (options?.status) params.set('status', options.status);
+    const qs = params.toString();
+    return this.request<{ contracts: Contract[] }>(
+      `/contracts${qs ? `?${qs}` : ''}`,
+    );
+  }
+
+  /**
+   * Gets a specific contract by ID.
+   */
+  async getContract(contractId: string): Promise<Contract> {
+    this.assertSecretKey('getContract()');
+    return this.request<Contract>(`/contracts/${contractId}`);
+  }
+
+  /**
+   * Updates a contract.
+   */
+  async updateContract(
+    contractId: string,
+    params: Partial<Pick<CreateContractParams, 'name' | 'endDate' | 'minimumUsdc' | 'maximumUsdc' | 'discountPct' | 'prepaidRollover' | 'includedUnits' | 'metadata'>>,
+  ): Promise<Contract> {
+    this.assertSecretKey('updateContract()');
+    return this.request<Contract>(
+      `/contracts/${contractId}`,
+      { method: 'PATCH', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Cancels a contract.
+   */
+  async deleteContract(contractId: string): Promise<{ success: boolean }> {
+    this.assertSecretKey('deleteContract()');
+    return this.request<{ success: boolean }>(
+      `/contracts/${contractId}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  /**
+   * Adds a price override to a contract.
+   */
+  async addContractOverride(
+    contractId: string,
+    params: CreateContractOverrideParams,
+  ): Promise<ContractPriceOverride> {
+    this.assertSecretKey('addContractOverride()');
+    return this.request<ContractPriceOverride>(
+      `/contracts/${contractId}/overrides`,
+      { method: 'POST', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Removes a price override from a contract.
+   */
+  async removeContractOverride(
+    contractId: string,
+    unitType: string,
+  ): Promise<{ success: boolean }> {
+    this.assertSecretKey('removeContractOverride()');
+    return this.request<{ success: boolean }>(
+      `/contracts/${contractId}/overrides/${encodeURIComponent(unitType)}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  // ==========================================================================
+  // Entitlement Plan Methods
+  // ==========================================================================
+
+  /**
+   * Creates an entitlement plan.
+   */
+  async createEntitlementPlan(params: CreateEntitlementPlanParams): Promise<EntitlementPlan> {
+    this.assertSecretKey('createEntitlementPlan()');
+    return this.request<EntitlementPlan>(
+      '/entitlement-plans',
+      { method: 'POST', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Lists all entitlement plans.
+   */
+  async listEntitlementPlans(): Promise<{ plans: EntitlementPlan[] }> {
+    this.assertSecretKey('listEntitlementPlans()');
+    return this.request<{ plans: EntitlementPlan[] }>('/entitlement-plans');
+  }
+
+  /**
+   * Gets a specific entitlement plan.
+   */
+  async getEntitlementPlan(planId: string): Promise<EntitlementPlan> {
+    this.assertSecretKey('getEntitlementPlan()');
+    return this.request<EntitlementPlan>(`/entitlement-plans/${planId}`);
+  }
+
+  /**
+   * Updates an entitlement plan.
+   */
+  async updateEntitlementPlan(
+    planId: string,
+    params: Partial<Pick<CreateEntitlementPlanParams, 'name' | 'description'> & { isDefault?: boolean; isActive?: boolean }>,
+  ): Promise<EntitlementPlan> {
+    this.assertSecretKey('updateEntitlementPlan()');
+    return this.request<EntitlementPlan>(
+      `/entitlement-plans/${planId}`,
+      { method: 'PATCH', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Deactivates an entitlement plan.
+   */
+  async deleteEntitlementPlan(planId: string): Promise<{ success: boolean }> {
+    this.assertSecretKey('deleteEntitlementPlan()');
+    return this.request<{ success: boolean }>(
+      `/entitlement-plans/${planId}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  /**
+   * Adds a feature rule to an entitlement plan.
+   */
+  async addEntitlementRule(
+    planId: string,
+    params: CreateEntitlementRuleParams,
+  ): Promise<EntitlementRule> {
+    this.assertSecretKey('addEntitlementRule()');
+    return this.request<EntitlementRule>(
+      `/entitlement-plans/${planId}/rules`,
+      { method: 'POST', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Lists rules for an entitlement plan.
+   */
+  async listEntitlementRules(planId: string): Promise<{ rules: EntitlementRule[] }> {
+    this.assertSecretKey('listEntitlementRules()');
+    return this.request<{ rules: EntitlementRule[] }>(
+      `/entitlement-plans/${planId}/rules`,
+    );
+  }
+
+  /**
+   * Updates an entitlement rule.
+   */
+  async updateEntitlementRule(
+    ruleId: string,
+    params: Partial<Pick<CreateEntitlementRuleParams, 'limitValue' | 'unlimited'>>,
+  ): Promise<EntitlementRule> {
+    this.assertSecretKey('updateEntitlementRule()');
+    return this.request<EntitlementRule>(
+      `/entitlement-rules/${ruleId}`,
+      { method: 'PATCH', body: JSON.stringify(params) },
+    );
+  }
+
+  /**
+   * Deletes an entitlement rule.
+   */
+  async deleteEntitlementRule(ruleId: string): Promise<{ success: boolean }> {
+    this.assertSecretKey('deleteEntitlementRule()');
+    return this.request<{ success: boolean }>(
+      `/entitlement-rules/${ruleId}`,
       { method: 'DELETE' },
     );
   }
@@ -2658,14 +3148,22 @@ export class Drip {
    *   description: 'API calls during trial period',
    * });
    *
-   * console.log(`Tracked: ${result.usageEventId}`);
+   * if (result.mode === 'sync') {
+   *   console.log(`Tracked: ${result.usageEventId}`);
+   * } else {
+   *   console.log(`Queued with key: ${result.idempotencyKey}`);
+   * }
    * ```
    */
+  async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
+  async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
   async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
     const idempotencyKey = params.idempotencyKey
       ?? deterministicIdempotencyKey('track', params.customerId, params.meter, params.quantity);
+    const mode = params.mode ?? 'sync';
+    const path = mode === 'sync' ? '/usage/internal' : '/usage/internal/batch';
 
-    return this.request<TrackUsageResult>('/usage/internal', {
+    const result = await this.request<TrackUsageResult>(path, {
       method: 'POST',
       body: JSON.stringify({
         customerId: params.customerId,
@@ -2677,6 +3175,15 @@ export class Drip {
         metadata: params.metadata,
       }),
     });
+
+    if (mode === 'batch') {
+      return {
+        ...(result as TrackUsageBatchResult),
+        mode: 'batch',
+      };
+    }
+
+    return result as TrackUsageSyncResult;
   }
 
   /**
@@ -2740,6 +3247,7 @@ export class Drip {
    * ```
    */
   async listEvents(options?: ListEventsOptions): Promise<ListEventsResponse> {
+    this.assertSecretKey('listEvents()');
     const params = new URLSearchParams();
 
     if (options?.customerId) {
@@ -2779,6 +3287,7 @@ export class Drip {
    * ```
    */
   async getEvent(eventId: string): Promise<ExecutionEvent> {
+    this.assertSecretKey('getEvent()');
     return this.request<ExecutionEvent>(`/events/${eventId}`);
   }
 
@@ -2800,6 +3309,7 @@ export class Drip {
    * ```
    */
   async getEventTrace(eventId: string): Promise<EventTrace> {
+    this.assertSecretKey('getEventTrace()');
     return this.request<EventTrace>(`/events/${eventId}/trace`);
   }
 
@@ -2817,6 +3327,7 @@ export class Drip {
    * ```
    */
   async getCharge(chargeId: string): Promise<Charge> {
+    this.assertSecretKey('getCharge()');
     return this.request<Charge>(`/charges/${chargeId}`);
   }
 
@@ -2839,6 +3350,7 @@ export class Drip {
    * ```
    */
   async listCharges(options?: ListChargesOptions): Promise<ListChargesResponse> {
+    this.assertSecretKey('listCharges()');
     const params = new URLSearchParams();
 
     if (options?.customerId) {
@@ -2891,6 +3403,7 @@ export class Drip {
    * ```
    */
   async checkEntitlement(params: CheckEntitlementParams): Promise<EntitlementCheckResult> {
+    this.assertSecretKey('checkEntitlement()');
     return this.request<EntitlementCheckResult>('/entitlements/check', {
       method: 'POST',
       body: JSON.stringify({
@@ -3343,6 +3856,7 @@ export class Drip {
    * ```
    */
   async getSubscription(subscriptionId: string): Promise<Subscription> {
+    this.assertSecretKey('getSubscription()');
     return this.request<Subscription>(`/subscriptions/${subscriptionId}`);
   }
 
@@ -3361,6 +3875,7 @@ export class Drip {
   async listSubscriptions(
     options?: ListSubscriptionsOptions,
   ): Promise<ListSubscriptionsResponse> {
+    this.assertSecretKey('listSubscriptions()');
     const params: Record<string, string> = {};
     if (options?.customerId) params.customerId = options.customerId;
     if (options?.status) params.status = options.status;
@@ -3739,6 +4254,7 @@ export class Drip {
    * ```
    */
   async listMeters(): Promise<ListMetersResponse> {
+    this.assertSecretKey('listMeters()');
     const response = await this.request<{
       data: Array<{
         id: string;

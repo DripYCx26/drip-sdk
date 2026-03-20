@@ -313,6 +313,102 @@ export const BILLING_IDENTITY_HEADERS = [
 ] as const;
 
 /**
+ * Query keys that can be used to spoof billing identity and must never be
+ * trusted from client-controlled URLs.
+ */
+export const BILLING_IDENTITY_QUERY_PARAMS = [
+  'customer_id',
+  'customerid',
+  'drip_customer_id',
+  'dripcustomerid',
+] as const;
+
+function isBillingIdentityQueryParam(name: string): boolean {
+  return BILLING_IDENTITY_QUERY_PARAMS.includes(
+    name.toLowerCase() as typeof BILLING_IDENTITY_QUERY_PARAMS[number],
+  );
+}
+
+/**
+ * Remove client-controlled billing identity headers from a header bag.
+ * Matching is case-insensitive and preserves all non-billing headers.
+ */
+export function stripBillingIdentityHeaders<TValue>(
+  headers: Record<string, TValue>,
+): Record<string, TValue> {
+  const sanitized: Record<string, TValue> = {};
+
+  for (const [key, value] of Object.entries(headers)) {
+    if (BILLING_IDENTITY_HEADERS.includes(key.toLowerCase() as typeof BILLING_IDENTITY_HEADERS[number])) {
+      continue;
+    }
+    sanitized[key] = value;
+  }
+
+  return sanitized;
+}
+
+/**
+ * Remove spoofable billing identity query params from a plain query object.
+ * Matching is case-insensitive and preserves all non-billing query keys.
+ */
+export function stripBillingIdentityQueryParams<TValue>(
+  query: Record<string, TValue>,
+): Record<string, TValue> {
+  const sanitized: Record<string, TValue> = {};
+
+  for (const [key, value] of Object.entries(query)) {
+    if (isBillingIdentityQueryParam(key)) {
+      continue;
+    }
+    sanitized[key] = value;
+  }
+
+  return sanitized;
+}
+
+/**
+ * Remove spoofable billing identity query params from URLSearchParams.
+ */
+export function stripBillingIdentitySearchParams(
+  searchParams: URLSearchParams,
+): URLSearchParams {
+  const sanitized = new URLSearchParams();
+
+  searchParams.forEach((value, key) => {
+    if (isBillingIdentityQueryParam(key)) {
+      return;
+    }
+    sanitized.append(key, value);
+  });
+
+  return sanitized;
+}
+
+/**
+ * Remove spoofable billing identity query params from an absolute or relative URL.
+ * If parsing fails, the original URL is returned unchanged.
+ */
+export function stripBillingIdentityQueryFromUrl(url: string): string {
+  try {
+    const isAbsolute = /^[a-zA-Z][a-zA-Z\d+\-.]*:/.test(url);
+    const parsed = isAbsolute
+      ? new URL(url)
+      : new URL(url, 'http://localhost');
+
+    parsed.search = stripBillingIdentitySearchParams(parsed.searchParams).toString();
+
+    if (isAbsolute) {
+      return parsed.toString();
+    }
+
+    return `${parsed.pathname}${parsed.search}${parsed.hash}`;
+  } catch {
+    return url;
+  }
+}
+
+/**
  * Resolve customer ID from a request based on configuration.
  *
  * Security: The resolver must derive the customer ID from a verified

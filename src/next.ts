@@ -10,6 +10,10 @@
  * export const POST = withDrip({
  *   meter: 'api_calls',
  *   quantity: 1,
+ *   customerResolver: async (req) => {
+ *     const session = await verifySession(req);
+ *     return session.dripCustomerId;
+ *   },
  * }, async (req, { charge }) => {
  *   return Response.json({ success: true });
  * });

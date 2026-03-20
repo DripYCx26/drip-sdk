@@ -12,6 +12,10 @@
  * export const POST = withDrip({
  *   meter: 'api_calls',
  *   quantity: 1,
+ *   customerResolver: async (req) => {
+ *     const session = await verifySession(req);
+ *     return session.dripCustomerId;
+ *   },
  * }, async (req, { drip, customerId, charge }) => {
  *   // Your handler - payment already verified
  *   const result = await generateContent(req);
@@ -33,6 +37,9 @@ import {
   getHeader,
   hasPaymentProof,
   BILLING_IDENTITY_HEADERS,
+  stripBillingIdentityHeaders,
+  stripBillingIdentitySearchParams,
+  stripBillingIdentityQueryFromUrl,
 } from './core.js';
 
 // ============================================================================
@@ -111,6 +118,84 @@ function searchParamsToObject(
   return result;
 }
 
+function getSanitizedRequestUrl(request: NextRequest): string {
+  return stripBillingIdentityQueryFromUrl(request.url);
+}
+
+function stripBillingIdentityHeadersFromRequestHeaders(headers: Headers): Headers {
+  const sanitized = new Headers(headers);
+  for (const header of BILLING_IDENTITY_HEADERS) {
+    sanitized.delete(header);
+  }
+  return sanitized;
+}
+
+function createSanitizedNextUrl(
+  nextUrl: NonNullable<NextRequest['nextUrl']>,
+  sanitizedUrl: URL,
+): NonNullable<NextRequest['nextUrl']> {
+  const sanitizedSearchParams = stripBillingIdentitySearchParams(nextUrl.searchParams);
+
+  return new Proxy(nextUrl, {
+    get(target, prop) {
+      if (prop === 'searchParams') {
+        return sanitizedSearchParams;
+      }
+      if (prop === 'search') {
+        return sanitizedUrl.search;
+      }
+      if (prop === 'href') {
+        return sanitizedUrl.toString();
+      }
+      if (prop === 'toString' || prop === 'toJSON') {
+        return () => sanitizedUrl.toString();
+      }
+
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function'
+        ? value.bind(target)
+        : value;
+    },
+  });
+}
+
+/**
+ * Present a resolver-safe request view with spoofable billing identity removed
+ * from headers and query-bearing URL surfaces.
+ */
+function createSanitizedResolverRequest(
+  request: NextRequest,
+): NextRequest {
+  const sanitizedHeaders = stripBillingIdentityHeadersFromRequestHeaders(request.headers);
+  const sanitizedUrl = getSanitizedRequestUrl(request);
+  const sanitizedParsedUrl = new URL(sanitizedUrl);
+  const sanitizedNextUrl = request.nextUrl
+    ? createSanitizedNextUrl(request.nextUrl, sanitizedParsedUrl)
+    : undefined;
+
+  return new Proxy(request, {
+    get(target, prop) {
+      if (prop === 'headers') {
+        return sanitizedHeaders;
+      }
+      if (prop === 'url') {
+        return sanitizedUrl;
+      }
+      if (prop === 'nextUrl') {
+        return sanitizedNextUrl;
+      }
+      if (prop === 'clone') {
+        return () => createSanitizedResolverRequest(target.clone());
+      }
+
+      const value = Reflect.get(target, prop, target);
+      return typeof value === 'function'
+        ? value.bind(target)
+        : value;
+    },
+  });
+}
+
 /**
  * Create a JSON error response.
  */
@@ -181,7 +266,7 @@ function paymentRequiredResponse(
  * Wrap a Next.js App Router handler with Drip billing.
  *
  * This wrapper:
- * 1. Resolves the customer ID from headers or query
+ * 1. Resolves the customer ID with your explicit customerResolver
  * 2. Checks customer balance
  * 3. If insufficient, returns 402 with x402 payment headers
  * 4. If payment proof provided, verifies and processes
@@ -197,6 +282,10 @@ function paymentRequiredResponse(
  * export const POST = withDrip({
  *   meter: 'tokens',
  *   quantity: (req) => req.headers.get('x-token-count') ?? 1,
+ *   customerResolver: async (req) => {
+ *     const session = await verifySession(req);
+ *     return session.dripCustomerId;
+ *   },
  * }, async (req, { charge }) => {
  *   console.log(`Charged ${charge.charge.amountUsdc} USDC`);
  *   return Response.json({ success: true });
@@ -226,20 +315,21 @@ export function withDrip(
     }
 
     // Convert Next.js request to generic format, stripping billing identity
-    // headers to prevent accidental use in customer resolvers.
-    const headers = headersToObject(request.headers);
-    for (const header of BILLING_IDENTITY_HEADERS) {
-      delete headers[header];
-    }
+    // headers and query params to prevent accidental use in customer resolvers.
+    const sanitizedSearchParams = request.nextUrl
+      ? stripBillingIdentitySearchParams(request.nextUrl.searchParams)
+      : undefined;
+    const headers = stripBillingIdentityHeaders(headersToObject(request.headers));
     const genericRequest = {
       method: request.method,
-      url: request.url,
+      url: getSanitizedRequestUrl(request),
       headers,
-      query: request.nextUrl
-        ? searchParamsToObject(request.nextUrl.searchParams)
+      query: sanitizedSearchParams
+        ? searchParamsToObject(sanitizedSearchParams)
         : {},
       body: requestBody,
     };
+    const resolverRequest = createSanitizedResolverRequest(request);
 
     // Resolve quantity if it's a function (needs access to original request)
     const resolvedQuantity = typeof config.quantity === 'function'
@@ -249,7 +339,11 @@ export function withDrip(
     // Wrap the customer resolver to use the original Next.js request
     let resolvedCustomerResolver: ((req: GenericRequest) => string | Promise<string>);
     const originalResolver = config.customerResolver;
-    resolvedCustomerResolver = async () => originalResolver(request);
+    if (typeof originalResolver === 'function') {
+      resolvedCustomerResolver = async () => originalResolver(resolverRequest);
+    } else {
+      resolvedCustomerResolver = originalResolver as unknown as (req: GenericRequest) => string | Promise<string>;
+    }
 
     // Resolve idempotencyKey if it's a function
     let resolvedIdempotencyKey: ((req: GenericRequest) => string | Promise<string>) | undefined;
@@ -349,6 +443,10 @@ export function withDrip(
  * export const withDrip = createWithDrip({
  *   apiKey: process.env.DRIP_API_KEY,
  *   baseUrl: process.env.DRIP_API_URL,
+ *   customerResolver: async (req) => {
+ *     const session = await verifySession(req);
+ *     return session.dripCustomerId;
+ *   },
  * });
  *
  * // app/api/generate/route.ts
