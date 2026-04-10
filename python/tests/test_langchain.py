@@ -140,31 +140,31 @@ class TestDripCallbackHandlerInit:
     def test_init_with_api_key(self, mock_drip: MagicMock) -> None:
         """Should initialize with API key."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
             workflow="test_workflow",
         )
-        mock_drip.assert_called_once_with(api_key="drip_sk_test", base_url=None)
+        mock_drip.assert_called_once_with(api_key="sk_test_1234567890", base_url=None)
         assert handler._customer_id == "cus_123"
         assert handler._workflow == "test_workflow"
 
     @patch("drip.integrations.langchain.Drip")
     def test_init_default_workflow(self, mock_drip: MagicMock) -> None:
         """Should use 'langchain' as default workflow."""
-        handler = DripCallbackHandler(api_key="drip_sk_test")
+        handler = DripCallbackHandler(api_key="sk_test_1234567890")
         assert handler._workflow == "langchain"
 
     @patch("drip.integrations.langchain.Drip")
     def test_customer_id_property_error(self, mock_drip: MagicMock) -> None:
         """Should raise error when customer_id not set."""
-        handler = DripCallbackHandler(api_key="drip_sk_test")
+        handler = DripCallbackHandler(api_key="sk_test_1234567890")
         with pytest.raises(ValueError, match="customer_id must be set"):
             _ = handler.customer_id
 
     @patch("drip.integrations.langchain.Drip")
     def test_customer_id_property_setter(self, mock_drip: MagicMock) -> None:
         """Should allow setting customer_id."""
-        handler = DripCallbackHandler(api_key="drip_sk_test")
+        handler = DripCallbackHandler(api_key="sk_test_1234567890")
         handler.customer_id = "cus_456"
         assert handler.customer_id == "cus_456"
 
@@ -181,7 +181,7 @@ class TestLLMCallbacks:
     def test_on_llm_start(self, mock_drip_class: MagicMock) -> None:
         """Should track LLM start."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         run_id = uuid.uuid4()
@@ -205,7 +205,7 @@ class TestLLMCallbacks:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -243,7 +243,7 @@ class TestLLMCallbacks:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
             emit_on_error=True,
         )
@@ -269,7 +269,7 @@ class TestLLMCallbacks:
         mock_drip_class.return_value = mock_client
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
             emit_on_error=False,
         )
@@ -299,7 +299,7 @@ class TestToolCallbacks:
     def test_on_tool_start(self, mock_drip_class: MagicMock) -> None:
         """Should track tool start."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         run_id = uuid.uuid4()
@@ -323,7 +323,7 @@ class TestToolCallbacks:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -350,7 +350,7 @@ class TestToolCallbacks:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -380,7 +380,7 @@ class TestChainCallbacks:
     def test_on_chain_start(self, mock_drip_class: MagicMock) -> None:
         """Should track chain start."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         run_id = uuid.uuid4()
@@ -404,7 +404,7 @@ class TestChainCallbacks:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -438,7 +438,7 @@ class TestAgentCallbacks:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -469,7 +469,7 @@ class TestAgentCallbacks:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -496,7 +496,7 @@ class TestRetrieverCallbacks:
     def test_on_retriever_start(self, mock_drip_class: MagicMock) -> None:
         """Should track retriever start."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         run_id = uuid.uuid4()
@@ -519,7 +519,7 @@ class TestRetrieverCallbacks:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -561,7 +561,7 @@ class TestRunManagement:
         mock_client.record_run.return_value = MagicMock(run=MagicMock(id="run_123"))
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -583,7 +583,7 @@ class TestRunManagement:
         mock_client.record_run.return_value = MagicMock(run=MagicMock(id="run_123"))
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -605,7 +605,7 @@ class TestRunManagement:
         mock_client.start_run.return_value = MagicMock(id="auto_run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
             auto_create_run=True,
         )
@@ -630,7 +630,7 @@ class TestRunManagement:
         mock_drip_class.return_value = mock_client
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
             auto_create_run=False,
         )
@@ -660,11 +660,11 @@ class TestAsyncDripCallbackHandler:
     def test_async_init(self, mock_async_drip: MagicMock) -> None:
         """Should initialize async handler."""
         handler = AsyncDripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
             workflow="async_workflow",
         )
-        mock_async_drip.assert_called_once_with(api_key="drip_sk_test", base_url=None)
+        mock_async_drip.assert_called_once_with(api_key="sk_test_1234567890", base_url=None)
         assert handler._customer_id == "cus_123"
         assert handler._workflow == "async_workflow"
 
@@ -673,7 +673,7 @@ class TestAsyncDripCallbackHandler:
     async def test_async_on_llm_start(self, mock_async_drip: MagicMock) -> None:
         """Should track LLM start asynchronously."""
         handler = AsyncDripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         run_id = uuid.uuid4()
@@ -698,7 +698,7 @@ class TestAsyncDripCallbackHandler:
         mock_client.emit_event = AsyncMock()
 
         handler = AsyncDripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -727,7 +727,7 @@ class TestAsyncDripCallbackHandler:
         )
 
         handler = AsyncDripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -746,7 +746,7 @@ class TestAsyncDripCallbackHandler:
         mock_client.end_run = AsyncMock()
 
         handler = AsyncDripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -769,7 +769,7 @@ class TestAsyncDripCallbackHandler:
         mock_client.emit_event = AsyncMock()
 
         handler = AsyncDripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -798,7 +798,7 @@ class TestEdgeCases:
     def test_on_llm_end_without_start(self, mock_drip_class: MagicMock) -> None:
         """Should handle LLM end without start gracefully."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 
@@ -810,7 +810,7 @@ class TestEdgeCases:
     def test_on_tool_end_without_start(self, mock_drip_class: MagicMock) -> None:
         """Should handle tool end without start gracefully."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         # Should not raise
@@ -820,7 +820,7 @@ class TestEdgeCases:
     def test_on_chain_end_without_start(self, mock_drip_class: MagicMock) -> None:
         """Should handle chain end without start gracefully."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         # Should not raise
@@ -830,7 +830,7 @@ class TestEdgeCases:
     def test_long_input_truncation(self, mock_drip_class: MagicMock) -> None:
         """Should truncate long inputs."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         run_id = uuid.uuid4()
@@ -853,7 +853,7 @@ class TestEdgeCases:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
             metadata={"base_key": "base_value"},
         )
@@ -876,7 +876,7 @@ class TestEdgeCases:
     def test_model_name_fallback(self, mock_drip_class: MagicMock) -> None:
         """Should handle missing model name."""
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
         run_id = uuid.uuid4()
@@ -899,7 +899,7 @@ class TestEdgeCases:
         mock_client.start_run.return_value = MagicMock(id="run_123")
 
         handler = DripCallbackHandler(
-            api_key="drip_sk_test",
+            api_key="sk_test_1234567890",
             customer_id="cus_123",
         )
 

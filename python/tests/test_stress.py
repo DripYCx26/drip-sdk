@@ -19,7 +19,7 @@ import respx
 from drip import AsyncDrip, Drip
 
 API_BASE_URL = "https://api.drippay.dev/v1"
-API_KEY = "drip_sk_test_stress"
+API_KEY = "sk_test_stress1234"
 
 
 def mock_charge_result(charge_id: str) -> dict:

@@ -12,7 +12,7 @@ import respx
 from drip import Drip
 
 API_BASE_URL = "https://api.drippay.dev/v1"
-API_KEY = "drip_sk_test_limit"
+API_KEY = "sk_test_limit12345"
 
 
 def mock_charge() -> dict:

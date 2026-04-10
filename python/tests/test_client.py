@@ -27,7 +27,7 @@ from drip import (
 
 @pytest.fixture
 def api_key() -> str:
-    return "drip_sk_test_123"
+    return "sk_test_1234567890"
 
 
 @pytest.fixture
@@ -66,9 +66,9 @@ class TestClientInitialization:
 
     def test_client_reads_api_key_from_env(self) -> None:
         """Client should read API key from environment."""
-        with patch.dict(os.environ, {"DRIP_API_KEY": "env_key_123"}):
+        with patch.dict(os.environ, {"DRIP_API_KEY": "sk_test_env_key_123"}):
             client = Drip()
-            assert client.config.api_key == "env_key_123"
+            assert client.config.api_key == "sk_test_env_key_123"
 
     def test_client_default_base_url(self, api_key: str) -> None:
         """Client should use default base URL."""
@@ -77,8 +77,8 @@ class TestClientInitialization:
 
     def test_client_custom_base_url(self, api_key: str) -> None:
         """Client should accept custom base URL."""
-        client = Drip(api_key=api_key, base_url="https://custom.api.com")
-        assert client.config.base_url == "https://custom.api.com"
+        client = Drip(api_key=api_key, base_url="https://custom.api.com/v1")
+        assert client.config.base_url == "https://custom.api.com/v1"
 
     def test_client_context_manager(self, api_key: str) -> None:
         """Client should work as context manager."""

@@ -26,7 +26,7 @@ from drip import (
 
 @pytest.fixture
 def api_key() -> str:
-    return "drip_sk_test_123"
+    return "sk_test_1234567890"
 
 
 @pytest.fixture
@@ -396,7 +396,7 @@ class TestEstimateFromUsage:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should estimate costs from usage with datetime objects."""
-        respx.post(f"{base_url}/dashboard/cost-estimate/from-usage").mock(
+        respx.post(f"{base_url}/cost-estimate/from-usage").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -414,7 +414,7 @@ class TestEstimateFromUsage:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should estimate costs from usage with ISO strings."""
-        respx.post(f"{base_url}/dashboard/cost-estimate/from-usage").mock(
+        respx.post(f"{base_url}/cost-estimate/from-usage").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -430,7 +430,7 @@ class TestEstimateFromUsage:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should support custom pricing overrides."""
-        route = respx.post(f"{base_url}/dashboard/cost-estimate/from-usage").mock(
+        route = respx.post(f"{base_url}/cost-estimate/from-usage").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -451,7 +451,7 @@ class TestEstimateFromUsage:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should filter by customer ID."""
-        route = respx.post(f"{base_url}/dashboard/cost-estimate/from-usage").mock(
+        route = respx.post(f"{base_url}/cost-estimate/from-usage").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -472,7 +472,7 @@ class TestEstimateFromUsage:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should filter by usage types."""
-        route = respx.post(f"{base_url}/dashboard/cost-estimate/from-usage").mock(
+        route = respx.post(f"{base_url}/cost-estimate/from-usage").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -497,7 +497,7 @@ class TestEstimateFromHypothetical:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should estimate costs from hypothetical usage with Pydantic models."""
-        respx.post(f"{base_url}/dashboard/cost-estimate/hypothetical").mock(
+        respx.post(f"{base_url}/cost-estimate/hypothetical").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -516,7 +516,7 @@ class TestEstimateFromHypothetical:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should estimate costs from hypothetical usage with dicts."""
-        respx.post(f"{base_url}/dashboard/cost-estimate/hypothetical").mock(
+        respx.post(f"{base_url}/cost-estimate/hypothetical").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -534,7 +534,7 @@ class TestEstimateFromHypothetical:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should support custom pricing overrides."""
-        route = respx.post(f"{base_url}/dashboard/cost-estimate/hypothetical").mock(
+        route = respx.post(f"{base_url}/cost-estimate/hypothetical").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -554,7 +554,7 @@ class TestEstimateFromHypothetical:
         self, client: Drip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should support per-item unit price override."""
-        route = respx.post(f"{base_url}/dashboard/cost-estimate/hypothetical").mock(
+        route = respx.post(f"{base_url}/cost-estimate/hypothetical").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -589,7 +589,7 @@ class TestAsyncCostEstimation:
         self, async_client: AsyncDrip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should estimate costs from usage asynchronously."""
-        respx.post(f"{base_url}/dashboard/cost-estimate/from-usage").mock(
+        respx.post(f"{base_url}/cost-estimate/from-usage").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 
@@ -606,7 +606,7 @@ class TestAsyncCostEstimation:
         self, async_client: AsyncDrip, base_url: str, mock_cost_estimate_response: dict[str, Any]
     ) -> None:
         """Should estimate costs from hypothetical usage asynchronously."""
-        respx.post(f"{base_url}/dashboard/cost-estimate/hypothetical").mock(
+        respx.post(f"{base_url}/cost-estimate/hypothetical").mock(
             return_value=httpx.Response(200, json=mock_cost_estimate_response)
         )
 

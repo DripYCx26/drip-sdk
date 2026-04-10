@@ -41,7 +41,7 @@ from drip import (
 
 # Test configuration
 API_BASE_URL = "https://api.drippay.dev/v1"
-API_KEY = "drip_sk_test_123"
+API_KEY = "sk_test_1234567890"
 
 
 @dataclass

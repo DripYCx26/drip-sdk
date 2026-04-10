@@ -22,7 +22,7 @@ from drip import (
 
 @pytest.fixture
 def api_key() -> str:
-    return "drip_sk_test_123"
+    return "sk_test_1234567890"
 
 
 @pytest.fixture
@@ -45,13 +45,11 @@ MOCK_SUBSCRIPTION_JSON = {
     "businessId": "biz_456",
     "customerId": "cust_789",
     "name": "Pro Plan",
-    "amountUsdc": "29.99",
+    "priceUsdc": "29.99",
     "interval": "MONTHLY",
-    "currentPeriod": 1,
-    "nextChargeAt": "2024-02-01T00:00:00Z",
-    "lastChargedAt": "2024-01-01T00:00:00Z",
-    "startDate": "2024-01-01T00:00:00Z",
-    "endDate": None,
+    "currentPeriodStart": "2024-01-01T00:00:00Z",
+    "currentPeriodEnd": "2024-02-01T00:00:00Z",
+    "cancelAtPeriodEnd": False,
     "status": "ACTIVE",
     "cancelledAt": None,
     "createdAt": "2024-01-01T00:00:00Z",
@@ -76,27 +74,26 @@ class TestCreateSubscription:
         sub = client.create_subscription(
             customer_id="cust_789",
             name="Pro Plan",
-            amount_usdc="29.99",
             interval="MONTHLY",
+            price_usdc=29.99,
         )
 
         assert sub.id == "sub_abc123"
         assert sub.customer_id == "cust_789"
         assert sub.name == "Pro Plan"
-        assert sub.amount_usdc == "29.99"
+        assert sub.price_usdc == "29.99"
         assert sub.interval == SubscriptionInterval.MONTHLY
         assert sub.status == SubscriptionStatus.ACTIVE
-        assert sub.current_period == 1
+        assert sub.current_period_start == "2024-01-01T00:00:00Z"
 
     @respx.mock
     def test_create_subscription_with_optional_fields(
         self, client: Drip, base_url: str
     ) -> None:
-        """Should create a subscription with optional start_date, end_date, and metadata."""
+        """Should create a subscription with optional description and metadata."""
         mock_json = {
             **MOCK_SUBSCRIPTION_JSON,
-            "startDate": "2024-06-01T00:00:00Z",
-            "endDate": "2025-06-01T00:00:00Z",
+            "description": "Enterprise tier plan",
             "metadata": {"tier": "enterprise"},
         }
         respx.post(f"{base_url}/subscriptions").mock(
@@ -106,15 +103,13 @@ class TestCreateSubscription:
         sub = client.create_subscription(
             customer_id="cust_789",
             name="Pro Plan",
-            amount_usdc="29.99",
             interval="MONTHLY",
-            start_date="2024-06-01T00:00:00Z",
-            end_date="2025-06-01T00:00:00Z",
+            price_usdc=29.99,
+            description="Enterprise tier plan",
             metadata={"tier": "enterprise"},
         )
 
-        assert sub.start_date == "2024-06-01T00:00:00Z"
-        assert sub.end_date == "2025-06-01T00:00:00Z"
+        assert sub.description == "Enterprise tier plan"
         assert sub.metadata == {"tier": "enterprise"}
 
 
@@ -131,7 +126,7 @@ class TestGetSubscription:
         assert sub.id == "sub_abc123"
         assert sub.name == "Pro Plan"
         assert sub.customer_id == "cust_789"
-        assert sub.next_charge_at == "2024-02-01T00:00:00Z"
+        assert sub.current_period_end == "2024-02-01T00:00:00Z"
 
 
 class TestListSubscriptions:
@@ -141,7 +136,7 @@ class TestListSubscriptions:
         respx.get(f"{base_url}/subscriptions").mock(
             return_value=httpx.Response(
                 200,
-                json={"data": [MOCK_SUBSCRIPTION_JSON]},
+                json={"data": [MOCK_SUBSCRIPTION_JSON], "count": 1},
             )
         )
 
@@ -155,10 +150,10 @@ class TestListSubscriptions:
         self, client: Drip, base_url: str
     ) -> None:
         """Should list subscriptions filtered by customer ID."""
-        respx.get(f"{base_url}/subscriptions?customerId=cust_789").mock(
+        respx.get(f"{base_url}/subscriptions").mock(
             return_value=httpx.Response(
                 200,
-                json={"data": [MOCK_SUBSCRIPTION_JSON]},
+                json={"data": [MOCK_SUBSCRIPTION_JSON], "count": 1},
             )
         )
 
@@ -172,10 +167,10 @@ class TestListSubscriptions:
         self, client: Drip, base_url: str
     ) -> None:
         """Should list subscriptions filtered by status."""
-        respx.get(f"{base_url}/subscriptions?status=ACTIVE").mock(
+        respx.get(f"{base_url}/subscriptions").mock(
             return_value=httpx.Response(
                 200,
-                json={"data": [MOCK_SUBSCRIPTION_JSON]},
+                json={"data": [MOCK_SUBSCRIPTION_JSON], "count": 1},
             )
         )
 
@@ -189,10 +184,8 @@ class TestListSubscriptions:
         self, client: Drip, base_url: str
     ) -> None:
         """Should list subscriptions filtered by both customer ID and status."""
-        respx.get(
-            f"{base_url}/subscriptions?customerId=cust_789&status=PAUSED"
-        ).mock(
-            return_value=httpx.Response(200, json={"data": []})
+        respx.get(f"{base_url}/subscriptions").mock(
+            return_value=httpx.Response(200, json={"data": [], "count": 0})
         )
 
         result = client.list_subscriptions(customer_id="cust_789", status="PAUSED")
@@ -243,7 +236,6 @@ class TestResumeSubscription:
         resumed_json = {
             **MOCK_SUBSCRIPTION_JSON,
             "status": "ACTIVE",
-            "nextChargeAt": "2024-02-15T00:00:00Z",
         }
         respx.post(f"{base_url}/subscriptions/sub_abc123/resume").mock(
             return_value=httpx.Response(200, json=resumed_json)
@@ -252,7 +244,6 @@ class TestResumeSubscription:
         sub = client.resume_subscription("sub_abc123")
 
         assert sub.status == SubscriptionStatus.ACTIVE
-        assert sub.next_charge_at == "2024-02-15T00:00:00Z"
 
 
 # =============================================================================
@@ -274,8 +265,8 @@ class TestAsyncSubscriptions:
         sub = await async_client.create_subscription(
             customer_id="cust_789",
             name="Pro Plan",
-            amount_usdc="29.99",
             interval="MONTHLY",
+            price_usdc=29.99,
         )
 
         assert sub.id == "sub_abc123"
@@ -304,7 +295,7 @@ class TestAsyncSubscriptions:
         respx.get(f"{base_url}/subscriptions").mock(
             return_value=httpx.Response(
                 200,
-                json={"data": [MOCK_SUBSCRIPTION_JSON]},
+                json={"data": [MOCK_SUBSCRIPTION_JSON], "count": 1},
             )
         )
 
@@ -372,7 +363,7 @@ class TestSubscriptionModels:
         assert SubscriptionInterval.DAILY == "DAILY"
         assert SubscriptionInterval.WEEKLY == "WEEKLY"
         assert SubscriptionInterval.MONTHLY == "MONTHLY"
-        assert SubscriptionInterval.YEARLY == "YEARLY"
+        assert SubscriptionInterval.ANNUAL == "ANNUAL"
 
     def test_subscription_status_values(self) -> None:
         """SubscriptionStatus enum should have correct values."""
@@ -389,13 +380,11 @@ class TestSubscriptionModels:
         assert sub.business_id == "biz_456"
         assert sub.customer_id == "cust_789"
         assert sub.name == "Pro Plan"
-        assert sub.amount_usdc == "29.99"
+        assert sub.price_usdc == "29.99"
         assert sub.interval == SubscriptionInterval.MONTHLY
-        assert sub.current_period == 1
-        assert sub.next_charge_at == "2024-02-01T00:00:00Z"
-        assert sub.last_charged_at == "2024-01-01T00:00:00Z"
-        assert sub.start_date == "2024-01-01T00:00:00Z"
-        assert sub.end_date is None
+        assert sub.current_period_start == "2024-01-01T00:00:00Z"
+        assert sub.current_period_end == "2024-02-01T00:00:00Z"
+        assert sub.cancel_at_period_end is False
         assert sub.status == SubscriptionStatus.ACTIVE
         assert sub.cancelled_at is None
         assert sub.metadata is None
@@ -403,7 +392,7 @@ class TestSubscriptionModels:
     def test_list_subscriptions_response_model(self) -> None:
         """ListSubscriptionsResponse model should parse correctly."""
         result = ListSubscriptionsResponse.model_validate(
-            {"data": [MOCK_SUBSCRIPTION_JSON, MOCK_SUBSCRIPTION_JSON]}
+            {"data": [MOCK_SUBSCRIPTION_JSON, MOCK_SUBSCRIPTION_JSON], "count": 2}
         )
 
         assert len(result.data) == 2

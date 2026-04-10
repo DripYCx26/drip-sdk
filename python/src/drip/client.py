@@ -353,15 +353,14 @@ class Drip:
         self._base_url = raw_url
         self._timeout = timeout or self.DEFAULT_TIMEOUT
 
-        # Setup resilience manager — enabled by default for production safety.
-        # Explicit False disables it for testing or low-level control.
-        if resilience is False:
-            self._resilience = None
+        # Setup resilience manager — disabled by default for backward compatibility.
+        # Pass resilience=True or a ResilienceConfig to enable.
+        if resilience is True:
+            self._resilience = ResilienceManager(ResilienceConfig.default())
         elif isinstance(resilience, ResilienceConfig):
             self._resilience = ResilienceManager(resilience)
         else:
-            # Default: enabled with standard config (resilience=True or None)
-            self._resilience = ResilienceManager(ResilienceConfig.default())
+            self._resilience = None
 
         # Customer resolution cache: external_customer_id -> drip_customer_id
         self._customer_cache: dict[str, str] = {}
@@ -2961,13 +2960,14 @@ class AsyncDrip:
         self._base_url = raw_url
         self._timeout = timeout or self.DEFAULT_TIMEOUT
 
-        # Setup resilience manager — enabled by default for production safety.
-        if resilience is False:
-            self._resilience = None
+        # Setup resilience manager — disabled by default for backward compatibility.
+        # Pass resilience=True or a ResilienceConfig to enable.
+        if resilience is True:
+            self._resilience = ResilienceManager(ResilienceConfig.default())
         elif isinstance(resilience, ResilienceConfig):
             self._resilience = ResilienceManager(resilience)
         else:
-            self._resilience = ResilienceManager(ResilienceConfig.default())
+            self._resilience = None
 
         # Customer resolution cache: external_customer_id -> drip_customer_id
         self._customer_cache: dict[str, str] = {}
