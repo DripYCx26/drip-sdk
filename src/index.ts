@@ -140,10 +140,9 @@ export interface DripConfig {
    *
    * Supports both key types:
    * - **Secret keys** (`sk_live_...` / `sk_test_...`): Full access to all endpoints
-   * - **Public keys** (`pk_live_...` / `pk_test_...`): Safe for client-side use only
-   *   in browser-safe flows. They cannot access administrative billing endpoints
-   *   like customers, charges, events, pricing plans, subscriptions, or entitlement checks.
-   *   Cannot access webhook management, API key management, or feature flags.
+   * - **Public keys** (`pk_live_...` / `pk_test_...`): Client-safe identifiers only.
+   *   The onboarding, billing, run/event, pricing-plan, subscription, webhook,
+   *   and entitlement flows in this SDK should use a secret key.
    *
    * @example "sk_live_abc123..." or "pk_live_abc123..."
    */
@@ -573,6 +572,100 @@ export interface CreateContractOverrideParams {
 }
 
 // ============================================================================
+// Customer Plan Change Types
+// ============================================================================
+
+/** A single per-unit price override (what a customer pays for one unit type). */
+export interface PlanChangePriceOverrideInput {
+  unitType: string;
+  unitPriceUsd: string;
+}
+
+/** Per-feature entitlement override. */
+export interface PlanChangeEntitlementOverrideInput {
+  dailyLimit?: number;
+  monthlyLimit?: number;
+  unlimited?: boolean;
+}
+
+/**
+ * Parameters for `applyCustomerPricingChange`. Accepts any combination of
+ * source pricing plan IDs, explicit overrides, and commercial terms. At
+ * least one field is required.
+ */
+export interface ApplyPricingChangeParams {
+  sourcePricingPlanIds?: string[];
+  priceOverrides?: PlanChangePriceOverrideInput[];
+  replaceAll?: boolean;
+  discountPct?: string;
+  minimumUsdc?: string;
+  maximumUsdc?: string;
+  includedUnits?: Record<string, number>;
+  prorate?: boolean;
+  /**
+   * Exact net proration amount to use instead of computing from the
+   * subscription delta. Sign encodes direction: positive = CHARGE,
+   * negative = CREDIT, "0" = ZERO. Use for multi-unit changes where
+   * summing override prices would produce a meaningless baseline.
+   */
+  prorationAmountOverride?: string;
+  effectiveDate?: string;
+  reason?: string;
+  performedBy?: string;
+}
+
+/** Parameters for `applyCustomerEntitlementChange`. */
+export interface ApplyEntitlementChangeParams {
+  planId: string;
+  overrides?: Record<string, PlanChangeEntitlementOverrideInput>;
+  reason?: string;
+  performedBy?: string;
+}
+
+export type PlanChangeType = 'PRICING' | 'ENTITLEMENT' | 'BOTH';
+export type PlanChangeStatus = 'APPLIED' | 'ROLLED_BACK' | 'SUPERSEDED';
+export type PlanChangeProrationDirection = 'NONE' | 'CREDIT' | 'CHARGE' | 'ZERO';
+
+/**
+ * A recorded pricing or entitlement change on a customer. Returned by
+ * apply / get / rollback / list operations.
+ */
+export interface CustomerPlanChange {
+  id: string;
+  businessId: string;
+  customerId: string;
+  changeType: PlanChangeType;
+  status: PlanChangeStatus;
+  effectiveFrom: string;
+  reason: string | null;
+  previousState: unknown;
+  newState: unknown;
+  prorationAmountUsd: string | null;
+  prorationDirection: PlanChangeProrationDirection | null;
+  proratedDays: number | null;
+  totalPeriodDays: number | null;
+  prorationPeriodStart: string | null;
+  prorationPeriodEnd: string | null;
+  prorationChargeId: string | null;
+  contractId: string | null;
+  performedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/** Response shape for `listCustomerPlanChanges`. */
+export interface ListCustomerPlanChangesResult {
+  data: CustomerPlanChange[];
+  total: number;
+}
+
+/** Pagination options for `listCustomerPlanChanges`. */
+export interface ListCustomerPlanChangesOptions {
+  limit?: number;
+  offset?: number;
+}
+
+// ============================================================================
 // Usage & Charge Types
 // ============================================================================
 
@@ -582,8 +675,23 @@ export interface CreateContractOverrideParams {
 export interface ChargeParams {
   /**
    * The Drip customer ID to charge.
+   *
+   * Either `customerId` or `externalCustomerId` is required. If you pass
+   * `externalCustomerId` instead, Drip will look up (or auto-provision) the
+   * matching customer on first use.
    */
-  customerId: string;
+  customerId?: string;
+
+  /**
+   * Your own database's customer ID. Use this if you'd rather not round-trip
+   * through `POST /customers` first — on first use, Drip auto-provisions an
+   * internal customer for the pair `(business, externalCustomerId)` and
+   * billing proceeds against it.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
+   * @example "user_42"
+   */
+  externalCustomerId?: string;
 
   /**
    * The usage meter/type to record against.
@@ -658,23 +766,45 @@ export type TrackUsageMode = 'batch' | 'sync';
 /**
  * Parameters for tracking usage without billing.
  * Use this for internal visibility, pilots, or pre-billing tracking.
+ *
+ * **Minimum viable payload:** only `customerId` is required. `meter` defaults
+ * to `"generic"` and `quantity` defaults to `1` on the server side, so you
+ * can start emitting events with zero ceremony:
+ *
+ * ```ts
+ * await drip.trackUsage({ customerId: customer.id });
+ * ```
  */
 export interface TrackUsageParams {
   /**
    * The Drip customer ID to track usage for.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
    * @example "cust_abc123"
    */
-  customerId: string;
+  customerId?: string;
+
+  /**
+   * Your own database's customer ID. If no Drip customer exists yet for this
+   * external ID, one is auto-provisioned as an internal customer on first
+   * use — no need to call `createCustomer()` first.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
+   * @example "user_42"
+   */
+  externalCustomerId?: string;
 
   /**
    * The meter/usage type (e.g., 'api_calls', 'tokens').
+   * Optional — defaults to `"generic"` when omitted.
    */
-  meter: string;
+  meter?: string;
 
   /**
    * The quantity of usage to record.
+   * Optional — defaults to `1` when omitted.
    */
-  quantity: number;
+  quantity?: number;
 
   /**
    * Unique key to prevent duplicate records.
@@ -1563,6 +1693,154 @@ export interface ListMetersResponse {
 }
 
 // ============================================================================
+// Pricing Plan Types
+// ============================================================================
+
+/**
+ * Supported pricing models.
+ *
+ * - `FLAT` — single `unitPriceUsd` applied to every unit.
+ * - `TIERED` — graduated pricing; each tier applies only to units within its range.
+ * - `VOLUME` — entire quantity priced at the single tier that contains it.
+ * - `PACKAGE` — bundled billing; quantity rounded up to nearest `packageSize`.
+ * - `PER_SEAT` — per-user/seat pricing; `unitPriceUsd` is price per seat per period.
+ */
+export type PricingModel = 'FLAT' | 'TIERED' | 'VOLUME' | 'PACKAGE' | 'PER_SEAT';
+
+/**
+ * A pricing tier within a TIERED, VOLUME, or PACKAGE plan.
+ */
+export interface PricingTier {
+  /** Tier ID */
+  id: string;
+
+  /** Minimum quantity for this tier (inclusive) */
+  minQuantity: string;
+
+  /** Maximum quantity for this tier (exclusive), or null for unbounded */
+  maxQuantity: string | null;
+
+  /** Price per unit in USD for this tier */
+  unitPriceUsd: string;
+
+  /** Optional flat fee in USD applied once when this tier is entered */
+  flatFeeUsd: string | null;
+
+  /** For PACKAGE model: number of units per package */
+  packageSize: number | null;
+}
+
+/**
+ * A tier input when creating or updating a pricing plan.
+ */
+export interface PricingTierInput {
+  /** Minimum quantity for this tier (inclusive, starts at 0) */
+  minQuantity: number;
+
+  /** Maximum quantity for this tier (exclusive), or null for unbounded (last tier) */
+  maxQuantity?: number | null;
+
+  /** Price per unit in USD for this tier */
+  unitPriceUsd: number;
+
+  /** Optional flat fee in USD */
+  flatFeeUsd?: number | null;
+
+  /** For PACKAGE model: number of units per package */
+  packageSize?: number | null;
+}
+
+/**
+ * A full pricing plan record.
+ */
+export interface PricingPlan {
+  /** Pricing plan ID */
+  id: string;
+
+  /** Human-readable name */
+  name: string;
+
+  /** The usage type this plan prices (e.g., "api_call", "token") */
+  unitType: string;
+
+  /** Price per unit in USD (string for decimal precision) */
+  unitPriceUsd: string;
+
+  /** Currency (always "USDC") */
+  currency: string;
+
+  /** Whether this plan is active */
+  isActive: boolean;
+
+  /** Pricing model */
+  pricingModel: PricingModel;
+
+  /** Pricing tiers (empty for FLAT and PER_SEAT models) */
+  tiers: PricingTier[];
+
+  /** ISO 8601 creation timestamp */
+  createdAt: string;
+
+  /** ISO 8601 last-updated timestamp */
+  updatedAt: string;
+}
+
+/**
+ * Parameters for creating a new pricing plan.
+ */
+export interface CreatePricingPlanParams {
+  /** Human-readable name */
+  name: string;
+
+  /** Usage type this plan prices (e.g., "api_call", "token", "compute_second") */
+  unitType: string;
+
+  /** Price per unit in USD (max 6 decimal places, e.g., 0.001) */
+  unitPriceUsd: number;
+
+  /** Whether this plan is active (default: true) */
+  isActive?: boolean;
+
+  /** Pricing model (default: "FLAT") */
+  pricingModel?: PricingModel;
+
+  /** Pricing tiers (required for TIERED, VOLUME, PACKAGE; must be empty for FLAT, PER_SEAT) */
+  tiers?: PricingTierInput[];
+}
+
+/**
+ * Parameters for updating an existing pricing plan.
+ * Price-affecting changes (unitPriceUsd, pricingModel, tiers) create a new version.
+ */
+export interface UpdatePricingPlanParams {
+  /** Updated plan name */
+  name?: string;
+
+  /** Updated price per unit in USD */
+  unitPriceUsd?: number;
+
+  /** Enable or disable the plan */
+  isActive?: boolean;
+
+  /** Change the pricing model (requires tiers if switching to TIERED/VOLUME/PACKAGE) */
+  pricingModel?: PricingModel;
+
+  /** Replace plan tiers (required when switching to tier-based models) */
+  tiers?: PricingTierInput[];
+}
+
+/**
+ * Response from listing pricing plans.
+ */
+export interface ListPricingPlansResponse {
+  /** Array of pricing plans */
+  data: PricingPlan[];
+
+  /** Total count */
+  count: number;
+}
+
+// ============================================================================
 // Cost Estimation Types
 // ============================================================================
 
@@ -1879,8 +2157,18 @@ export interface RunDetails {
 export interface WrapApiCallParams<T> {
   /**
    * The Drip customer ID to charge.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
    */
-  customerId: string;
+  customerId?: string;
+
+  /**
+   * Your own database's customer ID. First use auto-provisions an internal
+   * Drip customer — no need to call `createCustomer()` first.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
+   */
+  externalCustomerId?: string;
 
   /**
    * The usage meter/type to record against.
@@ -2113,6 +2401,89 @@ export interface EventTrace {
 
   /** If retried, all retry attempts */
   retryChain: ExecutionEvent[];
+}
+
+// ============================================================================
+// Payload Mapping Engine
+// ============================================================================
+
+/**
+ * A declarative transform from an arbitrary customer JSON shape into Drip's
+ * canonical usage event. Created once via `createPayloadMapping`, then
+ * referenced by slug in `POST /v1/ingest/:sourceName`.
+ */
+export interface PayloadMapping {
+  id: string;
+  businessId: string;
+  name: string;
+  /** URL-safe slug, unique per business. Used as `:mappingSlug` in ingest. */
+  sourceName: string;
+  sampleInput: Record<string, unknown> | null;
+  transformRules: Record<string, unknown>;
+  targetUnitType: string;
+  /** Restricted JSONPath expression resolving to a numeric quantity. */
+  targetQuantityPath: string;
+  /** Restricted JSONPath expression resolving to a Drip customer ID. */
+  targetCustomerIdPath: string;
+  /** Optional path for the idempotency key; Drip auto-generates a fallback otherwise. */
+  targetIdempotencyPath: string | null;
+  /** Map of metadata key → JSONPath expression. */
+  targetMetadataMap: Record<string, string> | null;
+  /** Optional literal `actionName` applied to every transformed event. */
+  targetActionName: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * An immutable historical snapshot of a {@link PayloadMapping}. A new version
+ * is appended on every update for audit and rollback.
+ */
+export interface PayloadMappingVersion {
+  id: string;
+  mappingId: string;
+  businessId: string;
+  version: number;
+  name: string;
+  sourceName: string;
+  sampleInput: Record<string, unknown> | null;
+  transformRules: Record<string, unknown>;
+  targetUnitType: string;
+  targetQuantityPath: string;
+  targetCustomerIdPath: string;
+  targetIdempotencyPath: string | null;
+  targetMetadataMap: Record<string, string> | null;
+  targetActionName: string | null;
+  createdBy: string | null;
+  createdAt: string;
+}
+
+export interface CreatePayloadMappingParams {
+  name: string;
+  sourceName: string;
+  sampleInput?: Record<string, unknown>;
+  transformRules?: Record<string, unknown>;
+  targetUnitType: string;
+  targetQuantityPath: string;
+  targetCustomerIdPath: string;
+  targetIdempotencyPath?: string;
+  targetMetadataMap?: Record<string, string>;
+  targetActionName?: string;
+  isActive?: boolean;
+}
+
+export type UpdatePayloadMappingParams = Partial<CreatePayloadMappingParams>;
+
+export interface PayloadMappingDryRunResult {
+  /** The `CreateEventInput` Drip would record against this mapping. */
+  event: Record<string, unknown>;
+}
+
+export interface PayloadMappingIngestResult {
+  event: Record<string, unknown>;
+  /** True when the idempotency key matched an existing event. */
+  replayed: boolean;
 }
 
 // ============================================================================
@@ -2996,13 +3367,22 @@ export class Drip {
    * ```
    */
   async charge(params: ChargeParams): Promise<ChargeResult> {
+    const identity = params.customerId ?? params.externalCustomerId;
+    if (!identity) {
+      throw new DripError(
+        'charge(): either customerId or externalCustomerId is required',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
     const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('chg', params.customerId, params.meter, params.quantity);
+      ?? deterministicIdempotencyKey('chg', identity, params.meter, params.quantity);
 
     return this.request<ChargeResult>('/usage', {
       method: 'POST',
       body: JSON.stringify({
         customerId: params.customerId,
+        externalCustomerId: params.externalCustomerId,
         usageType: params.meter,
         quantity: params.quantity,
         idempotencyKey,
@@ -3087,13 +3467,21 @@ export class Drip {
    * ```
    */
   async wrapApiCall<T>(params: WrapApiCallParams<T>): Promise<WrapApiCallResult<T>> {
+    const identity = params.customerId ?? params.externalCustomerId;
+    if (!identity) {
+      throw new DripError(
+        'wrapApiCall(): either customerId or externalCustomerId is required',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
     // Generate idempotency key BEFORE the call - this is the key insight!
     // Even if we crash after the API call, retrying with the same key is safe.
-    // CRIT-09: Deterministic key — no Date.now() or Math.random().
-    // quantity isn't known until after the call, so we use customerId + meter.
-    // The monotonic counter in deterministicIdempotencyKey ensures uniqueness.
+    // CRIT-09: Process-scoped deterministic key with startup entropy + counter.
+    // quantity isn't known until after the call, so we use identity + meter.
+    // Startup entropy plus monotonic counter ensures uniqueness across cold starts.
     const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('wrap', params.customerId, params.meter);
+      ?? deterministicIdempotencyKey('wrap', identity, params.meter);
 
     // Step 1: Make the external API call (no retry - we don't control this)
     const result = await params.call();
@@ -3106,6 +3494,7 @@ export class Drip {
       () =>
         this.charge({
           customerId: params.customerId,
+          externalCustomerId: params.externalCustomerId,
           meter: params.meter,
           quantity,
           idempotencyKey,
@@ -3158,8 +3547,20 @@ export class Drip {
   async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
   async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
   async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
+    const identity = params.customerId ?? params.externalCustomerId;
+    if (!identity) {
+      throw new DripError(
+        'trackUsage(): either customerId or externalCustomerId is required',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    // Apply defaults locally so the deterministic idempotency key is stable
+    // even when callers omit meter/quantity. These match the server defaults.
+    const meter = params.meter ?? 'generic';
+    const quantity = params.quantity ?? 1;
     const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('track', params.customerId, params.meter, params.quantity);
+      ?? deterministicIdempotencyKey('track', identity, meter, quantity);
     const mode = params.mode ?? 'sync';
     const path = mode === 'sync' ? '/usage/internal' : '/usage/internal/batch';
 
@@ -3167,8 +3568,9 @@ export class Drip {
       method: 'POST',
       body: JSON.stringify({
         customerId: params.customerId,
-        usageType: params.meter,
-        quantity: params.quantity,
+        externalCustomerId: params.externalCustomerId,
+        usageType: meter,
+        quantity,
         idempotencyKey,
         units: params.units,
         description: params.description,
@@ -3211,13 +3613,22 @@ export class Drip {
    * ```
    */
   async chargeAsync(params: ChargeParams): Promise<ChargeAsyncResult> {
+    const identity = params.customerId ?? params.externalCustomerId;
+    if (!identity) {
+      throw new DripError(
+        'chargeAsync(): either customerId or externalCustomerId is required',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
     const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('chg-async', params.customerId, params.meter, params.quantity);
+      ?? deterministicIdempotencyKey('chg-async', identity, params.meter, params.quantity);
 
     return this.request<ChargeAsyncResult>('/usage/async', {
       method: 'POST',
       body: JSON.stringify({
         customerId: params.customerId,
+        externalCustomerId: params.externalCustomerId,
         usageType: params.meter,
         quantity: params.quantity,
         idempotencyKey,
@@ -3412,6 +3823,119 @@ export class Drip {
         quantity: params.quantity ?? 1,
       }),
     });
+  }
+
+  // ==========================================================================
+  // Customer Plan Changes — per-customer pricing + entitlement swaps
+  //
+  // Eliminates the need to grandfather customers on old plans. Every apply
+  // call captures a full audit snapshot that can be rolled back.
+  // All methods require a secret key.
+  // ==========================================================================
+
+  /**
+   * Change a single customer's pricing without creating a new global plan.
+   *
+   * @param customerId - The Drip customer ID
+   * @param params - What to change (at least one field required)
+   * @returns A CustomerPlanChange row with audit + proration details
+   *
+   * @example
+   * ```typescript
+   * await drip.applyCustomerPricingChange('cust_123', {
+   *   sourcePricingPlanIds: ['plan_pro_api'],
+   *   discountPct: '15',
+   *   prorate: true,
+   *   reason: 'Upgraded after sales call',
+   * });
+   * ```
+   */
+  async applyCustomerPricingChange(
+    customerId: string,
+    params: ApplyPricingChangeParams,
+  ): Promise<CustomerPlanChange> {
+    this.assertSecretKey('applyCustomerPricingChange()');
+    return this.request<CustomerPlanChange>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes/pricing`,
+      {
+        method: 'POST',
+        body: JSON.stringify(params),
+      },
+    );
+  }
+
+  /**
+   * Change a single customer's entitlement plan (and/or per-feature overrides)
+   * without grandfathering.
+   *
+   * @example
+   * ```typescript
+   * await drip.applyCustomerEntitlementChange('cust_123', {
+   *   planId: 'plan_pro',
+   *   overrides: { search: { dailyLimit: 10000 } },
+   * });
+   * ```
+   */
+  async applyCustomerEntitlementChange(
+    customerId: string,
+    params: ApplyEntitlementChangeParams,
+  ): Promise<CustomerPlanChange> {
+    this.assertSecretKey('applyCustomerEntitlementChange()');
+    return this.request<CustomerPlanChange>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes/entitlement`,
+      {
+        method: 'POST',
+        body: JSON.stringify(params),
+      },
+    );
+  }
+
+  /**
+   * List the paginated history of pricing + entitlement changes for a
+   * customer, newest first.
+   */
+  async listCustomerPlanChanges(
+    customerId: string,
+    options: ListCustomerPlanChangesOptions = {},
+  ): Promise<ListCustomerPlanChangesResult> {
+    this.assertSecretKey('listCustomerPlanChanges()');
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.offset !== undefined) params.set('offset', String(options.offset));
+    const query = params.toString();
+    return this.request<ListCustomerPlanChangesResult>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes${query ? `?${query}` : ''}`,
+    );
+  }
+
+  /** Retrieve a single plan change by ID. */
+  async getCustomerPlanChange(
+    customerId: string,
+    changeId: string,
+  ): Promise<CustomerPlanChange> {
+    this.assertSecretKey('getCustomerPlanChange()');
+    return this.request<CustomerPlanChange>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes/${encodeURIComponent(changeId)}`,
+    );
+  }
+
+  /**
+   * Roll back a plan change, atomically restoring the previous state and
+   * writing an inverse change row to the history.
+   */
+  async rollbackCustomerPlanChange(
+    customerId: string,
+    changeId: string,
+    opts: { performedBy?: string } = {},
+  ): Promise<CustomerPlanChange> {
+    this.assertSecretKey('rollbackCustomerPlanChange()');
+    return this.request<CustomerPlanChange>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes/${encodeURIComponent(changeId)}/rollback`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts),
+      },
+    );
   }
 
   // ==========================================================================
@@ -4279,6 +4803,188 @@ export class Drip {
   }
 
   // ==========================================================================
+  // Pricing Plan Management Methods
+  // ==========================================================================
+
+  /**
+   * Creates a new pricing plan for a usage type.
+   *
+   * Each `unitType` can only have one active plan. If you need to change prices,
+   * use `updatePricingPlan()` (which creates a new version) or deactivate the
+   * existing plan first.
+   *
+   * @param params - Pricing plan creation parameters
+   * @returns The created pricing plan
+   *
+   * @example
+   * ```typescript
+   * // Simple flat-rate plan
+   * const plan = await drip.createPricingPlan({
+   *   name: 'API Calls',
+   *   unitType: 'api_call',
+   *   unitPriceUsd: 0.001,
+   * });
+   *
+   * // Tiered pricing plan
+   * const tiered = await drip.createPricingPlan({
+   *   name: 'Token Usage',
+   *   unitType: 'token',
+   *   unitPriceUsd: 0.0001,
+   *   pricingModel: 'TIERED',
+   *   tiers: [
+   *     { minQuantity: 0, maxQuantity: 10000, unitPriceUsd: 0.0001 },
+   *     { minQuantity: 10000, maxQuantity: 100000, unitPriceUsd: 0.00008 },
+   *     { minQuantity: 100000, maxQuantity: null, unitPriceUsd: 0.00005 },
+   *   ],
+   * });
+   * ```
+   */
+  async createPricingPlan(
+    params: CreatePricingPlanParams,
+  ): Promise<PricingPlan> {
+    this.assertSecretKey('createPricingPlan()');
+    return this.request<PricingPlan>('/pricing-plans', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Retrieves a pricing plan by ID.
+   *
+   * @param planId - The pricing plan ID
+   * @returns The pricing plan with tiers
+   *
+   * @example
+   * ```typescript
+   * const plan = await drip.getPricingPlan('plan_abc123');
+   * console.log(`${plan.name}: $${plan.unitPriceUsd}/${plan.unitType}`);
+   * console.log(`Model: ${plan.pricingModel}, Tiers: ${plan.tiers.length}`);
+   * ```
+   */
+  async getPricingPlan(planId: string): Promise<PricingPlan> {
+    this.assertSecretKey('getPricingPlan()');
+    return this.request<PricingPlan>(`/pricing-plans/${planId}`);
+  }
+
+  /**
+   * Lists all pricing plans for your business, including tiers.
+   *
+   * Unlike `listMeters()` (which returns a simplified view), this returns
+   * full plan details including pricing model, tiers, and timestamps.
+   *
+   * @returns List of pricing plans with full details
+   *
+   * @example
+   * ```typescript
+   * const { data: plans } = await drip.listPricingPlans();
+   *
+   * for (const plan of plans) {
+   *   console.log(`${plan.name} (${plan.unitType}): $${plan.unitPriceUsd}/unit [${plan.pricingModel}]`);
+   *   if (plan.tiers.length > 0) {
+   *     plan.tiers.forEach(t =>
+   *       console.log(`  ${t.minQuantity}–${t.maxQuantity ?? '∞'}: $${t.unitPriceUsd}`)
+   *     );
+   *   }
+   * }
+   * ```
+   */
+  async listPricingPlans(): Promise<ListPricingPlansResponse> {
+    this.assertSecretKey('listPricingPlans()');
+    return this.request<ListPricingPlansResponse>('/pricing-plans');
+  }
+
+  /**
+   * Updates a pricing plan.
+   *
+   * - **Metadata changes** (name, isActive) update the plan in place.
+   * - **Price changes** (unitPriceUsd, pricingModel, tiers) create a new version,
+   *   preserving billing history for existing charges.
+   *
+   * @param planId - The pricing plan ID
+   * @param params - Fields to update
+   * @returns The updated (or new version) pricing plan
+   *
+   * @example
+   * ```typescript
+   * // Rename a plan (metadata-only, no versioning)
+   * await drip.updatePricingPlan('plan_abc123', { name: 'Premium API Calls' });
+   *
+   * // Change price (creates a new version for billing history)
+   * const updated = await drip.updatePricingPlan('plan_abc123', {
+   *   unitPriceUsd: 0.002,
+   * });
+   *
+   * // Switch to tiered pricing
+   * await drip.updatePricingPlan('plan_abc123', {
+   *   pricingModel: 'TIERED',
+   *   tiers: [
+   *     { minQuantity: 0, maxQuantity: 1000, unitPriceUsd: 0.001 },
+   *     { minQuantity: 1000, maxQuantity: null, unitPriceUsd: 0.0005 },
+   *   ],
+   * });
+   *
+   * // Deactivate a plan (stops new charges, preserves history)
+   * await drip.updatePricingPlan('plan_abc123', { isActive: false });
+   * ```
+   */
+  async updatePricingPlan(
+    planId: string,
+    params: UpdatePricingPlanParams,
+  ): Promise<PricingPlan> {
+    this.assertSecretKey('updatePricingPlan()');
+    return this.request<PricingPlan>(`/pricing-plans/${planId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Soft-deletes a pricing plan by deactivating it.
+   *
+   * The plan is preserved for historical charges but will no longer be used
+   * for new usage events. You can reactivate it via `updatePricingPlan()`.
+   *
+   * @param planId - The pricing plan ID
+   *
+   * @example
+   * ```typescript
+   * await drip.deletePricingPlan('plan_abc123');
+   *
+   * // Reactivate later if needed:
+   * await drip.updatePricingPlan('plan_abc123', { isActive: true });
+   * ```
+   */
+  async deletePricingPlan(planId: string): Promise<void> {
+    this.assertSecretKey('deletePricingPlan()');
+    await this.request<void>(`/pricing-plans/${planId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
+   * Looks up the active pricing plan for a specific usage type.
+   *
+   * Convenience method for finding the plan that would apply to a given
+   * meter/usage type without listing all plans.
+   *
+   * @param unitType - The usage type (e.g., "api_call", "token")
+   * @returns The active pricing plan for this unit type
+   *
+   * @example
+   * ```typescript
+   * const plan = await drip.getPricingPlanByType('api_call');
+   * console.log(`API calls cost $${plan.unitPriceUsd} each`);
+   * ```
+   */
+  async getPricingPlanByType(unitType: string): Promise<PricingPlan> {
+    this.assertSecretKey('getPricingPlanByType()');
+    return this.request<PricingPlan>(
+      `/pricing-plans/by-type/${encodeURIComponent(unitType)}`,
+    );
+  }
+
+  // ==========================================================================
   // Cost Estimation Methods
   // ==========================================================================
 
@@ -4938,6 +5644,158 @@ export class Drip {
     return this.request<{ success: boolean }>(`/portal-sessions/${sessionId}`, {
       method: 'DELETE',
     });
+  }
+
+  // ==========================================================================
+  // Payload Mapping Engine
+  // ==========================================================================
+
+  /**
+   * Creates a payload mapping that transforms arbitrary JSON into Drip's
+   * canonical usage event shape. Once created, your services can POST their
+   * native payloads to `/v1/ingest/:sourceName` without any SDK code changes.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   *
+   * @example
+   * ```typescript
+   * const mapping = await drip.createPayloadMapping({
+   *   name: 'RPC Proxy Compute Units',
+   *   sourceName: 'rpc-proxy',
+   *   targetUnitType: 'eth_call_compute',
+   *   targetQuantityPath: '$.usage.compute_units',
+   *   targetCustomerIdPath: '$.request.customer',
+   *   targetIdempotencyPath: '$.request.id',
+   *   targetMetadataMap: { region: '$.meta.region' },
+   * });
+   * ```
+   */
+  async createPayloadMapping(
+    params: CreatePayloadMappingParams,
+  ): Promise<PayloadMapping> {
+    this.assertSecretKey('createPayloadMapping()');
+    return this.request<PayloadMapping>('/payload-mappings', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * List all payload mappings for the authenticated business.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   */
+  async listPayloadMappings(): Promise<{ mappings: PayloadMapping[] }> {
+    this.assertSecretKey('listPayloadMappings()');
+    return this.request<{ mappings: PayloadMapping[] }>('/payload-mappings', {
+      method: 'GET',
+    });
+  }
+
+  /**
+   * Get a single payload mapping by ID.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   */
+  async getPayloadMapping(id: string): Promise<PayloadMapping> {
+    this.assertSecretKey('getPayloadMapping()');
+    return this.request<PayloadMapping>(`/payload-mappings/${id}`, {
+      method: 'GET',
+    });
+  }
+
+  /**
+   * Update a payload mapping. Each update appends a new immutable snapshot
+   * to `PayloadMappingVersion` for rollback.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   */
+  async updatePayloadMapping(
+    id: string,
+    patch: UpdatePayloadMappingParams,
+  ): Promise<PayloadMapping> {
+    this.assertSecretKey('updatePayloadMapping()');
+    return this.request<PayloadMapping>(`/payload-mappings/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  /**
+   * Delete a payload mapping.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   */
+  async deletePayloadMapping(id: string): Promise<void> {
+    this.assertSecretKey('deletePayloadMapping()');
+    await this.request<void>(`/payload-mappings/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
+   * List historical version snapshots for a payload mapping.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   */
+  async listPayloadMappingVersions(
+    id: string,
+  ): Promise<{ versions: PayloadMappingVersion[] }> {
+    this.assertSecretKey('listPayloadMappingVersions()');
+    return this.request<{ versions: PayloadMappingVersion[] }>(
+      `/payload-mappings/${id}/versions`,
+      { method: 'GET' },
+    );
+  }
+
+  /**
+   * Dry-run a payload mapping against a sample payload. Returns the
+   * transformed event Drip *would* record — no side effects.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   */
+  async dryRunPayloadMapping(
+    id: string,
+    payload: Record<string, unknown>,
+  ): Promise<PayloadMappingDryRunResult> {
+    this.assertSecretKey('dryRunPayloadMapping()');
+    return this.request<PayloadMappingDryRunResult>(
+      `/payload-mappings/${id}/dry-run`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ payload }),
+      },
+    );
+  }
+
+  /**
+   * Ingest a raw payload via a named payload mapping. The payload is
+   * transformed on the edge using the mapping's rules and recorded as an
+   * event. The raw body is also persisted to the payload blob store for
+   * later inspection via `getEventPayload()`.
+   *
+   * Requires a secret key (`sk_*`) with the `OPERATOR` role or higher.
+   *
+   * @example
+   * ```typescript
+   * const result = await drip.ingestViaMapping('rpc-proxy', {
+   *   request:  { method: 'eth_call', customer: 'cus_abc', id: 'req-1' },
+   *   usage:    { compute_units: 17, cache_hit: false },
+   *   meta:     { region: 'us-east-1' },
+   * });
+   * ```
+   */
+  async ingestViaMapping(
+    mappingSlug: string,
+    payload: Record<string, unknown>,
+  ): Promise<PayloadMappingIngestResult> {
+    return this.request<PayloadMappingIngestResult>(
+      `/ingest/${encodeURIComponent(mappingSlug)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
   }
 }
 

@@ -11,9 +11,13 @@ This document covers billing, webhooks, and advanced features. For usage trackin
 - [Quick Start](#quick-start)
 - [Use Cases](#use-cases)
 - [API Reference](#api-reference)
+- [Pricing Plans](#pricing-plans)
 - [Subscription Billing](#subscription-billing)
 - [Entitlements](#entitlements-pre-request-authorization)
 - [Streaming Meter](#streaming-meter-llm-token-streaming)
+- [wrapApiCall](#wrapapicall--guaranteed-usage-recording)
+- [Customer Management (Advanced)](#customer-management-advanced)
+- [Event Trees and Traces](#event-trees-and-traces)
 - [Framework Middleware](#framework-middleware)
 - [LangChain Integration](#langchain-integration)
 - [Webhooks](#webhooks)
@@ -31,14 +35,11 @@ npm install @drip-sdk/node
 ```typescript
 import { Drip } from '@drip-sdk/node';
 
-// Secret key — full access (server-side only)
+// Secret key — use an Operator/Admin secret key for the flows in this guide
 const drip = new Drip({ apiKey: 'sk_live_...' });
-
-// Public key — usage, customers, billing (safe for client-side)
-const drip = new Drip({ apiKey: 'pk_live_...' });
 ```
 
-> **Key type detection:** The SDK auto-detects your key type from the prefix. Check `drip.keyType` to see if you're using a `'secret'`, `'public'`, or `'unknown'` key. Secret-key-only methods (webhooks, API key management, feature flags) will throw `DripError(403, 'PUBLIC_KEY_NOT_ALLOWED')` if called with a public key.
+> **Key type detection:** The SDK auto-detects your key type from the prefix. Check `drip.keyType` to see if you're using a `'secret'`, `'public'`, or `'unknown'` key. The customer, usage, charge, run, pricing, and webhook flows in this guide should use a secret key (`sk_*`).
 
 ---
 
@@ -48,7 +49,8 @@ Understanding `trackUsage` vs `charge`:
 
 | Method | What it does |
 |--------|--------------|
-| `trackUsage()` | Logs usage to the ledger (no billing) |
+| `trackUsage()` | Logs usage to the ledger (no billing). Default `mode: 'sync'` |
+| `trackUsage({ mode: 'batch' })` | High-throughput variant — queues events for bulk insert |
 | `charge()` | Converts usage into a billable charge |
 | `createSubscription()` | Creates a recurring subscription (auto-charges on interval) |
 
@@ -236,7 +238,7 @@ await drip.emitEvent({
 
 | Method | Description |
 |--------|-------------|
-| `trackUsage(params)` | Log usage to ledger (no billing) |
+| `trackUsage(params)` | Log usage to ledger (no billing). Supports `mode: 'sync'` (default) and `mode: 'batch'` for high-throughput |
 | `charge(params)` | Create a billable charge (sync — waits for settlement) |
 | `chargeAsync(params)` | Create a billable charge (async — returns 202, processes in background) |
 | `wrapApiCall(params)` | Wrap external API call with guaranteed usage recording |
@@ -250,11 +252,11 @@ await drip.emitEvent({
 |--------|-------------|
 | `recordRun(params)` | Log complete agent run (simplified) |
 | `startRun(params)` | Start execution trace |
-| `emitEvent(params)` | Log event within run |
+| `emitEvent(params)` | Log event within run (supports `parentEventId`, `spanId`) |
 | `emitEventsBatch(params)` | Batch log events |
 | `endRun(runId, params)` | Complete execution trace |
 | `getRun(runId)` | Get run details |
-| `getRunTimeline(runId)` | Get execution timeline |
+| `getRunTimeline(runId, options?)` | Get execution timeline (supports `limit`, `cursor`, `includeAnomalies`, `collapseRetries`) |
 | `listEvents(options?)` | List execution events with filters (customerId, runId, eventType, outcome) |
 | `getEvent(eventId)` | Get full event details |
 | `getEventTrace(eventId)` | Get causality trace (ancestors, children, retry chain) |
@@ -269,6 +271,8 @@ await drip.emitEvent({
 | `getOrCreateCustomer(externalCustomerId, metadata?)` | Idempotently create or retrieve a customer by external ID |
 | `getCustomer(customerId)` | Get customer details |
 | `listCustomers(options)` | List all customers |
+| `provisionCustomer(customerId)` | Provision/re-provision smart account (secret key only) |
+| `syncCustomerBalance(customerId)` | Sync on-chain balance from blockchain (secret key only) |
 
 ### Webhooks (Secret Key Only)
 
@@ -324,6 +328,55 @@ if (health) {
 }
 ```
 
+### Resilience modes
+
+The `resilience` constructor option accepts three forms:
+
+| Value | Rate limit | Retries | Circuit breaker | Best for |
+|-------|-----------|---------|-----------------|----------|
+| `true` (default) | 100 req/s, burst 200 | 3 retries | 5 failures to open | Most production apps |
+| `'high-throughput'` | 1,000 req/s, burst 2,000 | 2 retries | 10 failures to open | High-volume ingestion |
+| `false` | Disabled | Disabled | Disabled | Tests, low-level control |
+
+### Custom resilience config
+
+Pass a partial `ResilienceConfig` object to override specific settings:
+
+```typescript
+const drip = new Drip({
+  apiKey: 'sk_live_...',
+  resilience: {
+    rateLimiter: {
+      requestsPerSecond: 500,  // default: 100
+      burstSize: 1000,         // default: 200
+      enabled: true,
+    },
+    retry: {
+      maxRetries: 5,           // default: 3
+      baseDelayMs: 200,        // default: 100
+      maxDelayMs: 15000,       // default: 10000
+      retryableStatusCodes: [429, 500, 502, 503, 504], // default
+      enabled: true,
+    },
+    circuitBreaker: {
+      failureThreshold: 10,    // default: 5 — failures before opening
+      successThreshold: 3,     // default: 2 — successes to close again
+      timeoutMs: 60000,        // default: 30000 — wait before half-open
+      enabled: true,
+    },
+    collectMetrics: true,      // default: true — enables getMetrics()
+  },
+});
+```
+
+### Circuit breaker states
+
+| State | Meaning | Behavior |
+|-------|---------|----------|
+| `closed` | Healthy | All requests pass through |
+| `open` | Too many failures | Requests fail immediately (fast-fail) |
+| `half_open` | Testing recovery | Limited requests pass; if they succeed, circuit closes |
+
 ### Subscriptions (Secret Key Only)
 
 | Method | Description |
@@ -366,7 +419,19 @@ Contract management is available via the REST API. SDK methods are planned for a
 | POST | `/v1/contracts/:id/overrides` | Add pricing override |
 | DELETE | `/v1/contracts/:id/overrides/:unitType` | Remove pricing override |
 
-### API Keys, Pricing Plans & Usage Caps (REST API Only)
+### Pricing Plans (Secret Key Only)
+
+| Method | Description |
+|--------|-------------|
+| `createPricingPlan(params)` | Create a pricing plan (FLAT, TIERED, VOLUME, PACKAGE, PER_SEAT) |
+| `getPricingPlan(planId)` | Get a pricing plan by ID (with tiers) |
+| `listPricingPlans()` | List all pricing plans |
+| `updatePricingPlan(planId, params)` | Update a plan (price changes create a new version) |
+| `deletePricingPlan(planId)` | Soft-delete (deactivate) a plan |
+| `getPricingPlanByType(unitType)` | Look up the active plan for a usage type |
+| `listMeters()` | List meters (simplified pricing plan view) |
+
+### API Keys & Usage Caps (REST API Only)
 
 These administrative endpoints are available via the REST API with a secret key (`sk_`). SDK methods are planned for a future release.
 
@@ -376,8 +441,6 @@ These administrative endpoints are available via the REST API with a secret key 
 | `GET /v1/api-keys` | List API keys for your business |
 | `POST /v1/api-keys/:id/rotate` | Rotate an API key (old key expires after 24h grace period) |
 | `POST /v1/api-keys/:id/revoke` | Revoke an API key immediately |
-| `POST /v1/pricing-plans` | Create a pricing plan (unit type + price per unit) |
-| `GET /v1/pricing-plans` | List pricing plans |
 | `POST /v1/usage-caps` | Create a usage cap (daily/monthly charge or request limit) |
 | `GET /v1/usage-caps` | List usage caps |
 | `PATCH /v1/usage-caps/:id` | Update a usage cap (limit value, alert threshold, active status) |
@@ -390,6 +453,132 @@ These administrative endpoints are available via the REST API with a secret key 
 | `checkout(params)` | Create checkout session (fiat on-ramp) |
 | `listMeters()` | List available meters |
 | `ping()` | Verify API connection |
+
+---
+
+## Pricing Plans
+
+Pricing plans define how much to charge per unit of usage. Each `unitType` (e.g., `api_call`, `token`, `compute_second`) can have one active plan at a time.
+
+> **Requires a secret key (`sk_live_...`).** All pricing plan methods throw `DripError(403)` when called with a public key.
+
+### Create a Pricing Plan
+
+```typescript
+// Simple flat-rate plan
+const plan = await drip.createPricingPlan({
+  name: 'API Calls',
+  unitType: 'api_call',
+  unitPriceUsd: 0.001,  // $0.001 per call
+});
+
+// Tiered (graduated) pricing — each tier applies to its range only
+const tiered = await drip.createPricingPlan({
+  name: 'Token Usage',
+  unitType: 'token',
+  unitPriceUsd: 0.0001,
+  pricingModel: 'TIERED',
+  tiers: [
+    { minQuantity: 0, maxQuantity: 10000, unitPriceUsd: 0.0001 },
+    { minQuantity: 10000, maxQuantity: 100000, unitPriceUsd: 0.00008 },
+    { minQuantity: 100000, maxQuantity: null, unitPriceUsd: 0.00005 },
+  ],
+});
+
+// Volume pricing — entire quantity priced at the matching tier
+const volume = await drip.createPricingPlan({
+  name: 'Compute',
+  unitType: 'compute_second',
+  unitPriceUsd: 0.01,
+  pricingModel: 'VOLUME',
+  tiers: [
+    { minQuantity: 0, maxQuantity: 3600, unitPriceUsd: 0.01 },
+    { minQuantity: 3600, maxQuantity: null, unitPriceUsd: 0.005 },
+  ],
+});
+
+// Package pricing — charge per bundle of N units
+const pkg = await drip.createPricingPlan({
+  name: 'Storage',
+  unitType: 'gb_storage',
+  unitPriceUsd: 5.0,
+  pricingModel: 'PACKAGE',
+  tiers: [
+    { minQuantity: 0, maxQuantity: null, unitPriceUsd: 5.0, packageSize: 100 },
+  ],
+});
+
+// Per-seat pricing
+const seat = await drip.createPricingPlan({
+  name: 'Team License',
+  unitType: 'seat',
+  unitPriceUsd: 10.0,
+  pricingModel: 'PER_SEAT',
+});
+```
+
+### List & Look Up Plans
+
+```typescript
+// List all plans
+const { data: plans } = await drip.listPricingPlans();
+for (const plan of plans) {
+  console.log(`${plan.name} (${plan.unitType}): $${plan.unitPriceUsd}/unit [${plan.pricingModel}]`);
+}
+
+// Get a specific plan by ID
+const plan = await drip.getPricingPlan('plan_abc123');
+
+// Look up by usage type (convenience)
+const apiPlan = await drip.getPricingPlanByType('api_call');
+console.log(`API calls cost $${apiPlan.unitPriceUsd} each`);
+```
+
+### Update a Plan
+
+```typescript
+// Rename (metadata-only, no versioning)
+await drip.updatePricingPlan('plan_abc123', { name: 'Premium API Calls' });
+
+// Change price (creates a new version, preserving billing history)
+await drip.updatePricingPlan('plan_abc123', { unitPriceUsd: 0.002 });
+
+// Switch pricing model
+await drip.updatePricingPlan('plan_abc123', {
+  pricingModel: 'TIERED',
+  tiers: [
+    { minQuantity: 0, maxQuantity: 1000, unitPriceUsd: 0.001 },
+    { minQuantity: 1000, maxQuantity: null, unitPriceUsd: 0.0005 },
+  ],
+});
+```
+
+### Deactivate / Reactivate
+
+```typescript
+// Soft-delete (deactivate) — stops new charges, preserves history
+await drip.deletePricingPlan('plan_abc123');
+
+// Or deactivate via update (same effect, but returns the plan)
+await drip.updatePricingPlan('plan_abc123', { isActive: false });
+
+// Reactivate later
+await drip.updatePricingPlan('plan_abc123', { isActive: true });
+```
+
+### Pricing Models Reference
+
+| Model | Behavior | Tiers |
+|-------|----------|-------|
+| `FLAT` | `quantity * unitPriceUsd` | None |
+| `TIERED` | Each tier applies to units within its range (graduated) | Required |
+| `VOLUME` | Entire quantity priced at the single matching tier | Required |
+| `PACKAGE` | Quantity rounded up to nearest `packageSize`, then priced | Required (with `packageSize`) |
+| `PER_SEAT` | `seats * unitPriceUsd` per billing period | None |
+
+### Legacy: `listMeters()`
+
+The `listMeters()` method returns a simplified view of pricing plans (id, name, meter, unitPriceUsd, isActive). For full plan details including tiers and pricing models, use `listPricingPlans()` instead.
 
 ---
 
@@ -519,9 +708,80 @@ await drip.charge({ customerId: customer.id, meter: 'search', quantity: 1 });
 
 ---
 
+## Batch Mode (High-Throughput Usage Tracking)
+
+`trackUsage()` supports two write modes via the `mode` parameter:
+
+| Mode | Endpoint | Latency | Returns | Use case |
+|------|----------|---------|---------|----------|
+| `sync` (default) | `/usage/internal` | ~50ms | `usageEventId` | Standard tracking — you need the event ID |
+| `batch` | `/usage/internal/batch` | ~5ms | `pendingEvents`, `idempotencyKey` | High-volume, fire-and-forget telemetry |
+
+### Sync mode (default)
+
+```typescript
+const result = await drip.trackUsage({
+  customerId: customer.id,
+  meter: 'api_calls',
+  quantity: 1,
+});
+// result: TrackUsageSyncResult
+// result.usageEventId → "evt_abc123"
+// result.isInternal → false
+```
+
+### Batch mode
+
+Pass `mode: 'batch'` to enqueue the event for high-throughput bulk persistence. The server batches queued events and persists them in ~2-second windows.
+
+```typescript
+const result = await drip.trackUsage({
+  customerId: customer.id,
+  meter: 'api_calls',
+  quantity: 1,
+  mode: 'batch',
+});
+// result: TrackUsageBatchResult
+// result.mode → 'batch'
+// result.pendingEvents → 42 (number of events in the queue)
+// result.idempotencyKey → "track_cust_abc_api_calls_1_0"
+// result.usageEventId → undefined (not assigned until flush)
+```
+
+### Discriminating the result type
+
+```typescript
+const result = await drip.trackUsage({ customerId, meter, quantity, mode: 'batch' });
+
+if ('mode' in result && result.mode === 'batch') {
+  // TrackUsageBatchResult
+  console.log(`Queued: ${result.pendingEvents} pending`);
+} else {
+  // TrackUsageSyncResult
+  console.log(`Stored: ${result.usageEventId}`);
+}
+```
+
+### When to use batch mode
+
+- **High-frequency telemetry** — thousands of events/second (e.g., per-request API metering)
+- **Sub-cent microtransactions** — where latency matters more than immediate confirmation
+- **Fire-and-forget** — when you don't need the `usageEventId` right away
+- **Background workers** — batch jobs processing large volumes of usage data
+
+For standard integrations (~100 events/second or fewer), stick with the default `sync` mode.
+
+### Idempotency in batch mode
+
+Batch mode uses the same idempotency key system as sync mode. The SDK auto-generates a key if you don't provide one. Duplicate keys are silently deduplicated on the server — safe to retry.
+
+---
+
 ## Streaming Meter (LLM Token Streaming)
 
-For LLM token streaming, accumulate usage locally and flush once:
+Accumulate usage locally and charge once at the end — ideal for LLM token streaming and high-frequency metering where you don't want an API call per chunk.
+
+### Basic usage
 
 ```typescript
 const customer = await drip.createCustomer({ externalCustomerId: 'user_123' });
@@ -537,8 +797,108 @@ for await (const chunk of llmStream) {
 }
 
 // Single API call at end
+const result = await meter.flush();
+console.log(`Charged ${result.quantity} tokens`);
+```
+
+### `addSync()` — maximum performance
+
+Use `addSync()` instead of `add()` when you don't need auto-flush. It's synchronous and never makes an API call — pure local accumulation:
+
+```typescript
+for await (const chunk of llmStream) {
+  meter.addSync(chunk.tokens); // synchronous, no await needed
+}
 await meter.flush();
 ```
+
+### Auto-flush with `flushThreshold`
+
+Set a threshold to automatically flush when accumulated usage reaches a limit. Useful for long-running streams where you want periodic charges rather than one massive charge at the end:
+
+```typescript
+const meter = drip.createStreamMeter({
+  customerId: customer.id,
+  meter: 'tokens',
+  flushThreshold: 10_000, // auto-flush every 10k tokens
+});
+
+for await (const chunk of llmStream) {
+  await meter.add(chunk.tokens); // auto-flushes when total >= 10,000
+}
+
+// Flush any remaining tokens
+await meter.flush();
+```
+
+> **Note:** Auto-flush only triggers with `add()`, not `addSync()`. If you use `addSync()`, you must call `flush()` manually.
+
+### Callbacks
+
+Monitor accumulation and flush events with `onAdd` and `onFlush`:
+
+```typescript
+const meter = drip.createStreamMeter({
+  customerId: customer.id,
+  meter: 'tokens',
+  onAdd: (quantity, total) => {
+    console.log(`Added ${quantity}, running total: ${total}`);
+  },
+  onFlush: (result) => {
+    console.log(`Flushed ${result.quantity} tokens, charge: ${result.charge?.id}`);
+  },
+});
+```
+
+### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `total` | `number` | Current accumulated quantity (not yet charged) |
+| `isFlushed` | `boolean` | Whether this meter has been flushed at least once |
+| `flushCount` | `number` | Number of times this meter has been flushed |
+
+### `reset()` — discard accumulated usage
+
+Call `reset()` to discard accumulated usage without charging. Useful when the stream fails before delivery:
+
+```typescript
+try {
+  for await (const chunk of llmStream) {
+    meter.addSync(chunk.tokens);
+    yield chunk;
+  }
+  await meter.flush();
+} catch (error) {
+  meter.reset(); // discard — don't charge for undelivered tokens
+  throw error;
+}
+```
+
+### Multi-flush idempotency
+
+Each flush gets a unique idempotency key. If you provide an `idempotencyKey` in the options, each flush appends `_flush_0`, `_flush_1`, etc. If you don't provide one, the SDK generates a deterministic key per flush. Safe to retry.
+
+### StreamMeterOptions
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `customerId` | `string` | Yes | Customer to charge |
+| `meter` | `string` | Yes | Usage type (must match a pricing plan) |
+| `idempotencyKey` | `string` | No | Base key — `_flush_N` appended per flush |
+| `metadata` | `Record<string, unknown>` | No | Attached to the charge |
+| `flushThreshold` | `number` | No | Auto-flush when accumulated total reaches this |
+| `onAdd` | `(quantity, total) => void` | No | Called on each `add()` / `addSync()` |
+| `onFlush` | `(result) => void` | No | Called after each successful flush |
+
+### StreamMeterFlushResult
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `success` | `boolean` | Whether the flush succeeded |
+| `quantity` | `number` | Quantity that was charged |
+| `charge` | `Charge \| null` | The charge object (null if quantity was 0) |
+| `isDuplicate` | `boolean` | Whether the server deduplicated this flush |
 
 ---
 
@@ -749,6 +1109,165 @@ await drip.checkout({ customerId: customer.id, amount: 5000, returnUrl: 'https:/
 
 ---
 
+## `wrapApiCall()` — Guaranteed Usage Recording
+
+Wraps an external API call (OpenAI, Anthropic, etc.) with automatic charge recording. The key guarantee: even if your process crashes after the API call returns, retrying with the same idempotency key is safe — the charge won't double-count.
+
+```typescript
+const { result, charge } = await drip.wrapApiCall({
+  customerId: customer.id,
+  meter: 'tokens',
+  call: () => openai.chat.completions.create({
+    model: 'gpt-4',
+    messages: [{ role: 'user', content: 'Hello!' }],
+  }),
+  extractUsage: (r) => r.usage?.total_tokens ?? 0,
+});
+```
+
+**How it works:**
+1. Generates an idempotency key **before** the API call
+2. Calls your function (no retry — called exactly once)
+3. Extracts usage from the result via `extractUsage`
+4. Records the charge in Drip **with** retry (idempotency makes this safe)
+
+### Retry options
+
+The Drip charge call (step 4) retries automatically. You can customize this:
+
+```typescript
+const { result } = await drip.wrapApiCall({
+  customerId: customer.id,
+  meter: 'api_calls',
+  call: () => fetch('https://api.example.com/expensive'),
+  extractUsage: () => 1,
+  retryOptions: {
+    maxAttempts: 5,     // default: 3
+    baseDelayMs: 200,   // default: 100 — exponential backoff base
+    maxDelayMs: 10000,  // default: 5000 — maximum delay between retries
+    isRetryable: (err) => {
+      // Custom logic — by default retries on network errors, 5xx, 408, 429
+      return err instanceof DripError && err.statusCode >= 500;
+    },
+  },
+});
+```
+
+### WrapApiCallParams
+
+| Parameter | Type | Required | Description |
+|-----------|------|----------|-------------|
+| `customerId` | `string` | Yes | Customer to charge |
+| `meter` | `string` | Yes | Usage type (must match a pricing plan) |
+| `call` | `() => Promise<T>` | Yes | Your external API call |
+| `extractUsage` | `(result: T) => number` | Yes | Extract quantity from the API response |
+| `idempotencyKey` | `string` | No | Custom key — auto-generated if omitted |
+| `metadata` | `Record<string, unknown>` | No | Attached to the charge |
+| `retryOptions` | `RetryOptions` | No | Customize retry behavior for the charge call |
+
+---
+
+## Customer Management (Advanced)
+
+### `provisionCustomer(customerId)`
+
+Provisions (or re-provisions) an ERC-4337 smart account for a customer. On testnet, auto-funds with USDC. Requires a **secret key** (`sk_`).
+
+```typescript
+const customer = await drip.provisionCustomer('cust_abc123');
+console.log(customer.onchainAddress); // smart account address
+```
+
+Use this when:
+- A customer was created without an `onchainAddress` and now needs one
+- You need to re-provision after a failed initial provisioning
+- You're migrating customers to on-chain billing
+
+### `syncCustomerBalance(customerId)`
+
+Syncs a customer's on-chain balance from the blockchain. Requires a **secret key** (`sk_`).
+
+```typescript
+const { balance } = await drip.syncCustomerBalance('cust_abc123');
+console.log(`On-chain balance: ${balance} USDC`);
+```
+
+Use this when the dashboard shows a stale balance, or after an on-chain deposit that hasn't been picked up by the periodic sync.
+
+---
+
+## Event Trees and Traces
+
+### `parentEventId` — build causality trees
+
+Pass `parentEventId` when emitting events to build parent-child relationships. This creates a trace tree showing which events triggered which:
+
+```typescript
+const run = await drip.startRun({ customerId: customer.id, workflowId: 'pipeline' });
+
+// Root event
+const planning = await drip.emitEvent({
+  runId: run.id,
+  eventType: 'llm.call',
+  quantity: 500,
+  units: 'tokens',
+});
+
+// Child events — triggered by the planning step
+await drip.emitEvent({
+  runId: run.id,
+  eventType: 'tool.call',
+  quantity: 1,
+  parentEventId: planning.id, // links to parent
+});
+```
+
+Use `getEventTrace(eventId)` to retrieve the full tree (ancestors, children, retry chain).
+
+### `spanId` — OpenTelemetry linking
+
+Pass `spanId` to link Drip events with specific OpenTelemetry spans in your APM:
+
+```typescript
+await drip.emitEvent({
+  runId: run.id,
+  eventType: 'llm.call',
+  quantity: 1700,
+  units: 'tokens',
+  correlationId: span.spanContext().traceId,
+  spanId: span.spanContext().spanId, // links to a specific OTel span
+});
+```
+
+### `getRunTimeline()` options
+
+The timeline endpoint accepts pagination and filtering options:
+
+```typescript
+const timeline = await drip.getRunTimeline('run_abc123', {
+  limit: 50,              // max events to return (default: all)
+  cursor: 'evt_xyz...',   // pagination cursor from previous response
+  includeAnomalies: true, // include anomaly detection results (default: false)
+  collapseRetries: true,  // group retried events together (default: false)
+});
+
+for (const event of timeline.events) {
+  console.log(`${event.eventType}: ${event.outcome} (${event.durationMs}ms)`);
+  if (event.parentEventId) {
+    console.log(`  └─ child of ${event.parentEventId}`);
+  }
+}
+```
+
+| Option | Type | Default | Description |
+|--------|------|---------|-------------|
+| `limit` | `number` | all | Max events to return |
+| `cursor` | `string` | — | Pagination cursor |
+| `includeAnomalies` | `boolean` | `false` | Include anomaly detection results |
+| `collapseRetries` | `boolean` | `false` | Group retried events into a single entry |
+
+---
+
 ## Event Querying
 
 Query execution events recorded via `emitEvent()` or `emitEventsBatch()`.
@@ -804,6 +1323,52 @@ try {
 }
 ```
 
+### Error codes
+
+The `DripError` object includes a machine-readable `code` field. Common codes you may encounter:
+
+| Code | HTTP | Meaning | What to do |
+|------|------|---------|------------|
+| `CUSTOMER_NOT_FOUND` | 404 | Customer ID doesn't exist | Create customer first with `createCustomer()` |
+| `DUPLICATE_CUSTOMER` | 409 | Customer already exists | Use `getOrCreateCustomer()` for idempotent creation |
+| `CUSTOMER_BLOCKED` | 403 | Customer is blocked/suspended | Contact support |
+| `INTERNAL_CUSTOMER` | 400 | Trying to bill an internal-only customer | Use a non-internal customer for billing |
+| `PUBLIC_KEY_NOT_ALLOWED` | 403 | Using a public key for a secret-key-only endpoint | Switch to `sk_` key |
+| `UNAUTHORIZED` | 401 | Invalid or missing API key | Check `DRIP_API_KEY` |
+| `VALIDATION_ERROR` | 422 | Missing or invalid request fields | Check `error.data` for field-level details |
+| `INVALID_PARAMETER` | 400 | Parameter value out of range | Check parameter constraints |
+| `NOT_FOUND` | 404 | Resource doesn't exist | Verify the ID |
+| `DUPLICATE_PRICING_PLAN` | 409 | Pricing plan for this unit type exists | Fetch existing plan |
+| `INSUFFICIENT_BALANCE` | 400 | Customer balance too low | Top up via checkout or deposit |
+| `PAYMENT_REQUIRED` | 402 | Charge requires payment | Customer needs funds |
+| `RATE_LIMIT_EXCEEDED` | 429 | Too many requests | Back off and retry (SDK handles automatically) |
+| `SERVICE_UNAVAILABLE` | 503 | Temporary server issue | Retry with backoff |
+| `WEBHOOK_LIMIT_EXCEEDED` | 400 | Too many webhooks configured | Delete unused webhooks |
+| `PROVISIONING_FAILED` | 500 | Smart account provisioning failed | Retry or check network status |
+
+```typescript
+try {
+  await drip.charge({ customerId, meter: 'tokens', quantity: 100 });
+} catch (error) {
+  if (error instanceof DripError) {
+    switch (error.code) {
+      case 'CUSTOMER_NOT_FOUND':
+        // Create customer first
+        break;
+      case 'INSUFFICIENT_BALANCE':
+      case 'PAYMENT_REQUIRED':
+        // Redirect to checkout
+        break;
+      case 'RATE_LIMIT_EXCEEDED':
+        // SDK retries automatically, but you hit the limit
+        break;
+      default:
+        console.error(`${error.code}: ${error.message}`);
+    }
+  }
+}
+```
+
 ---
 
 ## Gotchas
@@ -825,16 +1390,12 @@ await drip.charge({
 
 ### Public Key Restrictions
 
-Public keys (`pk_`) cannot access webhook, API key, or feature flag management endpoints. If you see `PUBLIC_KEY_NOT_ALLOWED` (403), switch to a secret key (`sk_`):
+Public keys (`pk_`) are not the right credential for the onboarding, billing, and observability flows in this guide. Use an Operator/Admin secret key (`sk_*`) for customer, usage, charge, run, event, pricing-plan, and webhook operations. Depending on the method, a `pk_*` call may fail locally with `PUBLIC_KEY_NOT_ALLOWED` or be rejected by the API with `403 FORBIDDEN`.
 
 ```typescript
-// Wrong — public keys can't manage webhooks
-const drip = new Drip({ apiKey: 'pk_live_...' });
-await drip.createWebhook({ ... }); // Throws DripError(403)
-
-// Right — use a secret key for admin operations
+// Right — use a secret key for billing/admin operations
 const drip = new Drip({ apiKey: 'sk_live_...' });
-await drip.createWebhook({ ... }); // Works
+await drip.createWebhook({ ... });
 ```
 
 ### Rate Limits

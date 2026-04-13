@@ -24,9 +24,6 @@ npm install @drip-sdk/node
 ```bash
 # Secret key — full API access (server-side only, never expose publicly)
 export DRIP_API_KEY=sk_test_...
-
-# Or public key — read/write access for usage, customers, billing (safe for client-side)
-export DRIP_API_KEY=pk_test_...
 ```
 
 Or use a `.env` file (recommended):
@@ -69,11 +66,8 @@ import { Drip } from '@drip-sdk/node';
 // Auto-reads DRIP_API_KEY from environment
 const client = new Drip();
 
-// Or pass config explicitly with a secret key (full access)
-const client = new Drip({ apiKey: 'sk_test_...' });
-
-// Or with a public key (safe for client-side, limited scope)
-const client = new Drip({ apiKey: 'pk_test_...' });
+// Or pass config explicitly with an Operator/Admin secret key
+const clientWithSecret = new Drip({ apiKey: 'sk_test_...' });
 ```
 
 ### Full Example
@@ -185,38 +179,106 @@ Common patterns:
 
 ---
 
+## Batch Mode (High-Throughput Usage Tracking)
+
+By default, `trackUsage()` persists each event synchronously (mode: `'sync'`). For high-throughput scenarios — thousands of events per second, sub-cent microtransactions, or fire-and-forget telemetry — use **batch mode** to queue events for bulk insertion:
+
+```typescript
+// Sync mode (default) — waits for persistence, returns usageEventId
+const sync = await drip.trackUsage({
+  customerId: customer.id,
+  meter: 'api_calls',
+  quantity: 1,
+});
+console.log(sync.usageEventId); // "evt_abc123"
+
+// Batch mode — enqueues for bulk insert (~2s), returns immediately
+const batch = await drip.trackUsage({
+  customerId: customer.id,
+  meter: 'api_calls',
+  quantity: 1,
+  mode: 'batch',
+});
+console.log(batch.pendingEvents); // number of queued events
+console.log(batch.idempotencyKey); // key for deduplication
+```
+
+### When to use which mode
+
+| Mode | Latency | Response | Best for |
+|------|---------|----------|----------|
+| `sync` (default) | ~50ms | `usageEventId` | Low-to-medium volume, when you need the event ID immediately |
+| `batch` | ~5ms | `pendingEvents`, `idempotencyKey` | High-volume telemetry, sub-cent events, fire-and-forget |
+
+### Discriminating the response
+
+The return type is a union. Use the `mode` field to narrow:
+
+```typescript
+const result = await drip.trackUsage({
+  customerId: customer.id,
+  meter: 'tokens',
+  quantity: 500,
+  mode: 'batch',
+});
+
+if ('mode' in result && result.mode === 'batch') {
+  // TrackUsageBatchResult — no usageEventId yet
+  console.log(`Queued (${result.pendingEvents} pending)`);
+} else {
+  // TrackUsageSyncResult — event ID available
+  console.log(`Tracked: ${result.usageEventId}`);
+}
+```
+
+### StreamMeter (accumulate locally, flush once)
+
+For LLM token streaming or other scenarios where you accumulate usage incrementally, use `StreamMeter` to avoid per-chunk API calls:
+
+```typescript
+const meter = drip.createStreamMeter({
+  customerId: customer.id,
+  meter: 'tokens',
+});
+
+for await (const chunk of llmStream) {
+  meter.addSync(chunk.tokens); // no API call — local accumulation
+}
+
+const result = await meter.flush(); // single API call at the end
+```
+
+See [FULL_SDK.md](./FULL_SDK.md#streaming-meter-llm-token-streaming) for full StreamMeter options (auto-flush thresholds, callbacks, etc.).
+
+---
+
 ## API Key Types
 
 Drip issues two key types per API key pair. Each has different access scopes:
 
 | Key Type | Prefix | Access | Use In |
 |----------|--------|--------|--------|
-| **Secret Key** | `sk_live_` / `sk_test_` | Full API access (all endpoints) | Server-side only |
-| **Public Key** | `pk_live_` / `pk_test_` | Usage tracking, customers, billing, analytics, sessions | Client-side safe |
+| **Secret Key** | `sk_live_` / `sk_test_` | Server-side API access with RBAC | Server-side only |
+| **Public Key** | `pk_live_` / `pk_test_` | Client-safe identifier only | Not for the onboarding and billing flows in this guide |
 
-### What public keys **can** access
-- Usage tracking (`trackUsage`, `recordRun`, `startRun`, `emitEvent`, etc.)
-- Customer management (`createCustomer`, `getCustomer`, `listCustomers`)
-- Billing & charges (`charge`, `getBalance`, `listCharges`, etc.)
-- Pricing plans, sessions, analytics, usage caps, refunds
+Use a secret key for the examples in this README:
+- `createCustomer()`
+- `trackUsage()` / `charge()`
+- `recordRun()` / `startRun()` / `emitEvent()`
+- pricing plans, webhooks, balances, and customer management
 
-### What public keys **cannot** access (secret key required)
-- Webhook management (`createWebhook`, `listWebhooks`, `deleteWebhook`, etc.)
-- API key management (create, rotate, revoke keys)
-- Feature flag management
+Public keys (`pk_*`) are not the right credential for those flows. Depending on the method, the SDK may block the call locally with `PUBLIC_KEY_NOT_ALLOWED` or the API may reject it with `403 FORBIDDEN`.
 
-The SDK detects your key type automatically and will throw a `DripError` with code `PUBLIC_KEY_NOT_ALLOWED` (HTTP 403) if you attempt a secret-key-only operation with a public key.
+The SDK detects your key type automatically:
 
 ```typescript
 const drip = new Drip({ apiKey: 'pk_test_...' });
 console.log(drip.keyType); // 'public'
 
-// Create a customer first, then track usage
-const customer = await drip.createCustomer({ externalCustomerId: 'user_123' });
-await drip.trackUsage({ customerId: customer.id, meter: 'api_calls', quantity: 1 });
-
-// This throws DripError(403, 'PUBLIC_KEY_NOT_ALLOWED')
-await drip.createWebhook({ url: '...', events: ['charge.succeeded'] });
+// Use a secret key for customer, billing, and run/event writes:
+const serverDrip = new Drip({ apiKey: 'sk_test_...' });
+const customer = await serverDrip.createCustomer({ externalCustomerId: 'user_123' });
+await serverDrip.trackUsage({ customerId: customer.id, meter: 'api_calls', quantity: 1 });
 ```
 
 ---
