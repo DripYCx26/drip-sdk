@@ -45,24 +45,35 @@ const drip = new Drip({ apiKey: 'sk_live_...' });
 
 ## Billing Lifecycle
 
-Understanding `trackUsage` vs `charge`:
+Everything flows through a single method: `trackUsage()`. The `mode`
+parameter controls whether the backend creates a billable charge, queues
+it, or records the event for internal visibility only.
 
-| Method | What it does |
-|--------|--------------|
-| `trackUsage()` | Logs usage to the ledger (no billing). Default `mode: 'sync'` |
-| `trackUsage({ mode: 'batch' })` | High-throughput variant — queues events for bulk insert |
-| `charge()` | Converts usage into a billable charge |
-| `createSubscription()` | Creates a recurring subscription (auto-charges on interval) |
+| Call | Endpoint | Semantics |
+| ---- | -------- | --------- |
+| `trackUsage({ ... })` | `POST /usage` | Default. Billing-aware — creates a charge if a pricing plan matches the unit type |
+| `trackUsage({ ..., mode: 'batch' })` | `POST /usage/async` | High-throughput — queued, returns 202, charge created in background |
+| `trackUsage({ ..., mode: 'internal' })` | `POST /usage/internal` | Visibility-only — never bills |
+| `createSubscription()` | — | Recurring subscription (auto-charges on interval) |
+
+> **Migration note:** The old `charge()` and `chargeAsync()` methods were
+> removed. They were thin wrappers around `POST /usage` and `POST /usage/async`
+> that duplicated `trackUsage`. Replace `drip.charge({...})` with
+> `drip.trackUsage({...})` and `drip.chargeAsync({...})` with
+> `drip.trackUsage({..., mode: 'batch'})`. `getCharge()` / `listCharges()`
+> remain for read-only reconciliation.
 
 **Typical flow:**
 
-1. `trackUsage()` throughout the day/request stream
+1. `trackUsage()` throughout the day/request stream (hits `/usage`,
+   creates charges automatically when a pricing plan is configured)
 2. Optionally `estimateFromUsage()` to preview cost
-3. `charge()` to create billable charges
-4. `getBalance()` / `listCharges()` for reconciliation
-5. Webhooks for `charge.succeeded` / `charge.failed`
+3. `getBalance()` / `listCharges()` for reconciliation
+4. Webhooks for `charge.succeeded` / `charge.failed`
 
-> Most pilots start with `trackUsage()` only. Add `charge()` when you're ready to bill.
+> Start pilots with `mode: 'internal'` during development. Switch to the
+> default billing mode once you've configured a pricing plan for your unit
+> type via `createPricingPlan()`.
 
 ---
 
@@ -655,7 +666,7 @@ Contracts let you create per-customer commercial agreements with custom pricing,
 
 Check if a customer is allowed to use a feature **before** processing the request. This avoids wasting compute on customers who are over quota.
 
-Entitlement counters are automatically incremented when you call `charge()` — no extra work needed.
+Entitlement counters are automatically incremented when you call `trackUsage()` in billing mode (default `mode: 'sync'`) — no extra work needed.
 
 ```typescript
 const customer = await drip.createCustomer({ externalCustomerId: 'user_123' });
@@ -1405,9 +1416,9 @@ If you hit 429, back off and retry. The SDK handles this automatically with expo
 ### trackUsage vs charge
 
 - `trackUsage()` = logging (free, no balance impact)
-- `charge()` = billing (deducts from balance)
+- `trackUsage()` (default mode) = billing (deducts from balance when pricing plan matches)
 
-Start with `trackUsage()` during pilots. Add `charge()` when ready to bill.
+Start with `trackUsage({ mode: 'internal' })` during pilots. Drop `mode` (default = billing) when ready to bill.
 
 ---
 
