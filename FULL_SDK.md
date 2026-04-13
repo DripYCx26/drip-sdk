@@ -715,7 +715,7 @@ await drip.charge({ customerId: customer.id, meter: 'search', quantity: 1 });
 | `periodResetsAt` | `string` | ISO timestamp for when the period resets |
 | `reason` | `string?` | Denial reason (only present when `allowed` is `false`) |
 
-> **Setup:** Entitlement plans, rules, and customer assignments are managed via the REST API. See the [Entitlements guide](../../docs/integration/ENTITLEMENTS.md) for full API reference and setup walkthrough.
+> **Setup:** Entitlement plans, rules, and customer assignments are managed via the REST API. See the [Entitlements guide](../../docs/integration/entitlements.md) for full API reference and setup walkthrough.
 
 ---
 

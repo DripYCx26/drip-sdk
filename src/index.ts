@@ -5600,14 +5600,136 @@ export class Drip {
   }
 
   // ==========================================================================
-  // Payload Mapping Engine — REMOVED
+  // Payload Mapping Engine
   // ==========================================================================
-  //
-  // The payload mapping routes (`/payload-mappings`, `/ingest/:slug`) are
-  // not implemented on the backend. The previous SDK methods returned 404
-  // Not Found at runtime, which was worse than not exposing them at all.
-  // The interfaces (`PayloadMapping`, `CreatePayloadMappingParams`, etc.)
-  // are still exported from this file for a future revival of the feature.
+
+  /**
+   * Creates a payload mapping that transforms arbitrary JSON into Drip's
+   * canonical usage event shape. Once created, your services can POST
+   * their native payloads to `/v1/ingest/:sourceName` and Drip walks the
+   * payload using restricted JSONPath rules to produce a canonical event.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   *
+   * @example
+   * ```typescript
+   * const mapping = await drip.createPayloadMapping({
+   *   name: 'RPC Proxy Compute Units',
+   *   sourceName: 'rpc-proxy',
+   *   targetUnitType: 'eth_call_compute',
+   *   targetQuantityPath: '$.usage.compute_units',
+   *   targetCustomerIdPath: '$.request.customer',
+   *   targetIdempotencyPath: '$.request.id',
+   *   targetMetadataMap: { region: '$.meta.region' },
+   * });
+   * ```
+   */
+  async createPayloadMapping(
+    params: CreatePayloadMappingParams,
+  ): Promise<PayloadMapping> {
+    this.assertSecretKey('createPayloadMapping()');
+    return this.request<PayloadMapping>('/payload-mappings', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /** List all payload mappings for the authenticated business. */
+  async listPayloadMappings(): Promise<{ mappings: PayloadMapping[]; count: number }> {
+    this.assertSecretKey('listPayloadMappings()');
+    return this.request<{ mappings: PayloadMapping[]; count: number }>('/payload-mappings', {
+      method: 'GET',
+    });
+  }
+
+  /** Get a single payload mapping by ID. */
+  async getPayloadMapping(id: string): Promise<PayloadMapping> {
+    this.assertSecretKey('getPayloadMapping()');
+    return this.request<PayloadMapping>(`/payload-mappings/${id}`, {
+      method: 'GET',
+    });
+  }
+
+  /**
+   * Update a payload mapping. Each update appends an immutable
+   * snapshot to `payload_mapping_versions` for rollback / audit.
+   */
+  async updatePayloadMapping(
+    id: string,
+    patch: UpdatePayloadMappingParams,
+  ): Promise<PayloadMapping> {
+    this.assertSecretKey('updatePayloadMapping()');
+    return this.request<PayloadMapping>(`/payload-mappings/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  /** Delete a payload mapping. */
+  async deletePayloadMapping(id: string): Promise<void> {
+    this.assertSecretKey('deletePayloadMapping()');
+    await this.request<void>(`/payload-mappings/${id}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /** List historical version snapshots for a payload mapping. */
+  async listPayloadMappingVersions(
+    id: string,
+  ): Promise<{ versions: PayloadMappingVersion[]; count: number }> {
+    this.assertSecretKey('listPayloadMappingVersions()');
+    return this.request<{ versions: PayloadMappingVersion[]; count: number }>(
+      `/payload-mappings/${id}/versions`,
+      { method: 'GET' },
+    );
+  }
+
+  /**
+   * Dry-run a payload mapping against a sample payload. Returns the
+   * canonical event Drip *would* record — no side effects, no DB write.
+   */
+  async dryRunPayloadMapping(
+    id: string,
+    payload: Record<string, unknown>,
+  ): Promise<PayloadMappingDryRunResult> {
+    this.assertSecretKey('dryRunPayloadMapping()');
+    return this.request<PayloadMappingDryRunResult>(
+      `/payload-mappings/${id}/dry-run`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ payload }),
+      },
+    );
+  }
+
+  /**
+   * Ingest a raw payload via a named payload mapping. The payload is
+   * transformed on the edge using the mapping's rules and recorded as
+   * a canonical usage event.
+   *
+   * Requires a secret key (`sk_*`) with the `OPERATOR` role or higher.
+   *
+   * @example
+   * ```typescript
+   * await drip.ingestViaMapping('rpc-proxy', {
+   *   request: { method: 'eth_call', customer: 'cus_abc', id: 'req-1' },
+   *   usage:   { compute_units: 17, cache_hit: false },
+   *   meta:    { region: 'us-east-1' },
+   * });
+   * ```
+   */
+  async ingestViaMapping(
+    sourceName: string,
+    payload: Record<string, unknown>,
+  ): Promise<PayloadMappingIngestResult> {
+    return this.request<PayloadMappingIngestResult>(
+      `/ingest/${encodeURIComponent(sourceName)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
+  }
 }
 
 // Re-export StreamMeter types
