@@ -868,6 +868,29 @@ interface BaseTrackUsageResult {
 
   /** Confirmation message */
   message: string;
+
+  /**
+   * When the request was recorded on the internal/visibility path
+   * instead of as an on-chain charge. Present on both the default
+   * `mode: 'sync'` and `mode: 'batch'` paths when the customer has
+   * no on-chain address or is marked `isInternal: true`.
+   */
+  mode?: 'internal';
+
+  /**
+   * True when `POST /usage` auto-promoted to `/usage/internal` because
+   * the customer has no on-chain address. False for customers already
+   * marked `isInternal: true` (they stay on the internal path but
+   * weren't "promoted" — they were never eligible for billing). Absent
+   * when the request landed on the regular billing path.
+   */
+  autoPromoted?: boolean;
+
+  /**
+   * Human-readable explanation of why the request was routed to the
+   * internal path. Present whenever `mode === 'internal'`.
+   */
+  reason?: string;
 }
 
 /**
@@ -883,10 +906,16 @@ export interface TrackUsageSyncResult extends BaseTrackUsageResult {
 
 /**
  * Result of tracking usage in batch mode.
+ *
+ * Note: the `mode` field is widened in BaseTrackUsageResult to accept
+ * the server's `'internal'` marker for auto-promoted requests. The
+ * batch-specific marker `'batch'` is the only value emitted by the
+ * SDK's own client-side synthesis on the batch path, so the two are
+ * kept in a discriminated union via the optional `mode` field.
  */
-export interface TrackUsageBatchResult extends BaseTrackUsageResult {
+export interface TrackUsageBatchResult extends Omit<BaseTrackUsageResult, 'mode'> {
   /** Explicit batch mode marker */
-  mode: 'batch';
+  mode: 'batch' | 'internal';
 
   /** Whether this customer is internal-only, when returned by the API */
   isInternal?: undefined;
