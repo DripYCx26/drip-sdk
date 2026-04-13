@@ -32,9 +32,9 @@ export interface DripConfig {
    *
    * Supports both key types:
    * - **Secret keys** (`sk_live_...` / `sk_test_...`): Full access to all endpoints
-   * - **Public keys** (`pk_live_...` / `pk_test_...`): Safe for client-side use only
-   *   in browser-safe flows. They cannot access administrative billing endpoints
-   *   like customers or entitlement management.
+   * - **Public keys** (`pk_live_...` / `pk_test_...`): Client-safe identifiers only.
+   *   The customer, usage, and run/event flows exposed by this SDK should use
+   *   a secret key.
    *
    * @example "sk_live_abc123..." or "pk_live_abc123..."
    */
@@ -642,6 +642,168 @@ export interface EntitlementCheckResult {
 
   /** Reason for denial (only present when allowed=false) */
   reason?: string;
+}
+
+// ============================================================================
+// Customer Plan Change Types
+// ============================================================================
+
+/**
+ * A single price override (what a customer pays for one unit type).
+ */
+export interface PriceOverrideInput {
+  /** The unit type to override (e.g. "api_call", "token"). */
+  unitType: string;
+  /** The per-unit price the customer will pay, as a decimal string. */
+  unitPriceUsd: string;
+}
+
+/**
+ * Per-feature entitlement override (overrides the rule's default limit).
+ */
+export interface EntitlementOverrideInput {
+  /** Override for rules with period=DAILY. */
+  dailyLimit?: number;
+  /** Override for rules with period=MONTHLY. */
+  monthlyLimit?: number;
+  /** Mark the feature as unlimited for this customer. */
+  unlimited?: boolean;
+}
+
+/**
+ * Parameters for changing a customer's pricing without grandfathering.
+ *
+ * Combine `sourcePricingPlanIds` (copy prices from existing plans) with
+ * explicit `priceOverrides` (last-write-wins on conflict), and/or adjust
+ * commercial terms. At least one field is required.
+ */
+export interface ApplyPricingChangeParams {
+  /**
+   * Copy unit prices from these pricing plans onto the customer's contract
+   * as overrides. Use this to "move customer X onto Plan Y" without touching
+   * the plan itself or any other customer.
+   */
+  sourcePricingPlanIds?: string[];
+
+  /**
+   * Explicit per-unit-type overrides. Combined with `sourcePricingPlanIds`;
+   * values here win on conflict.
+   */
+  priceOverrides?: PriceOverrideInput[];
+
+  /**
+   * When true, any existing overrides on the customer's contract are
+   * cleared before the new set is written. Default: merge.
+   */
+  replaceAll?: boolean;
+
+  /** Blanket discount percentage (e.g. "15" = 15%). */
+  discountPct?: string;
+  /** Minimum spend per period (USDC). */
+  minimumUsdc?: string;
+  /** Maximum spend per period (USDC). */
+  maximumUsdc?: string;
+  /** Included free units per period (e.g. `{ api_call: 10000 }`). */
+  includedUnits?: Record<string, number>;
+
+  /**
+   * Compute proration against the customer's current subscription period.
+   * Returns proration fields on the change row. No-op for pure metered
+   * customers with no subscription.
+   */
+  prorate?: boolean;
+
+  /**
+   * Exact net proration amount to use instead of computing from the
+   * subscription delta. Sign encodes direction: positive = CHARGE,
+   * negative = CREDIT, "0" = ZERO (skip ledger entry). Use this for
+   * multi-unit changes where summing override prices would produce a
+   * meaningless baseline.
+   */
+  prorationAmountOverride?: string;
+
+  /** Effective date (ISO string). v1 applies immediately regardless. */
+  effectiveDate?: string;
+
+  /** Human-readable reason, surfaced in the audit row. */
+  reason?: string;
+  /** Free-form actor identifier for audit. */
+  performedBy?: string;
+}
+
+/**
+ * Parameters for changing a customer's entitlement plan.
+ */
+export interface ApplyEntitlementChangeParams {
+  /** Target entitlement plan ID. Required. */
+  planId: string;
+  /** Per-feature overrides. Replaces existing overrides wholesale. */
+  overrides?: Record<string, EntitlementOverrideInput>;
+  /** Human-readable reason, surfaced in the audit row. */
+  reason?: string;
+  /** Free-form actor identifier for audit. */
+  performedBy?: string;
+}
+
+/**
+ * The type of change recorded on a CustomerPlanChange row.
+ */
+export type PlanChangeType = 'PRICING' | 'ENTITLEMENT' | 'BOTH';
+
+/**
+ * Current status of a recorded plan change.
+ */
+export type PlanChangeStatus = 'APPLIED' | 'ROLLED_BACK' | 'SUPERSEDED';
+
+/**
+ * Direction of a prorated amount.
+ */
+export type PlanChangeProrationDirection = 'NONE' | 'CREDIT' | 'CHARGE' | 'ZERO';
+
+/**
+ * A recorded pricing or entitlement change on a customer.
+ */
+export interface CustomerPlanChange {
+  id: string;
+  businessId: string;
+  customerId: string;
+  changeType: PlanChangeType;
+  status: PlanChangeStatus;
+  effectiveFrom: string;
+  reason: string | null;
+  /** Full snapshot of the previous pricing/entitlement state. */
+  previousState: unknown;
+  /** Full snapshot of the new pricing/entitlement state. */
+  newState: unknown;
+  prorationAmountUsd: string | null;
+  prorationDirection: PlanChangeProrationDirection | null;
+  proratedDays: number | null;
+  totalPeriodDays: number | null;
+  prorationPeriodStart: string | null;
+  prorationPeriodEnd: string | null;
+  prorationChargeId: string | null;
+  contractId: string | null;
+  performedBy: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+/**
+ * Response shape for `listCustomerPlanChanges`.
+ */
+export interface ListCustomerPlanChangesResult {
+  data: CustomerPlanChange[];
+  total: number;
+}
+
+/**
+ * Options for `listCustomerPlanChanges`.
+ */
+export interface ListCustomerPlanChangesOptions {
+  /** Max rows to return (1..200, default 50). */
+  limit?: number;
+  /** Offset for pagination (default 0). */
+  offset?: number;
 }
 
 // ============================================================================
@@ -1493,6 +1655,165 @@ export class Drip {
         quantity: params.quantity ?? 1,
       }),
     });
+  }
+
+  // ==========================================================================
+  // Customer Plan Changes — per-customer pricing + entitlement swaps
+  //
+  // These methods eliminate the need to grandfather customers on old plans.
+  // Every call captures a full audit snapshot that can be rolled back with
+  // `rollbackCustomerPlanChange()`. All require a secret key.
+  // ==========================================================================
+
+  /**
+   * Change a single customer's pricing — price overrides, discount, spend
+   * caps, and included units — without creating a new global pricing plan
+   * or affecting any other customer.
+   *
+   * @param customerId - The Drip customer ID
+   * @param params - What to change (at least one field required)
+   * @returns The CustomerPlanChange row with proration + audit snapshots
+   * @throws {DripError} 404 if customer or any source pricing plan is missing
+   * @throws {DripError} 400 if no pricing fields are provided
+   *
+   * @example
+   * ```typescript
+   * // Move a customer onto "Pro" pricing by copying from existing plans
+   * await drip.applyCustomerPricingChange('cust_123', {
+   *   sourcePricingPlanIds: ['plan_pro_api', 'plan_pro_tokens'],
+   *   discountPct: '15',
+   *   prorate: true,
+   *   reason: 'Upgraded after sales call',
+   * });
+   *
+   * // Or set explicit per-unit prices for this customer only
+   * await drip.applyCustomerPricingChange('cust_123', {
+   *   priceOverrides: [
+   *     { unitType: 'api_call', unitPriceUsd: '0.0005' },
+   *     { unitType: 'token',    unitPriceUsd: '0.00001' },
+   *   ],
+   *   replaceAll: true,
+   * });
+   * ```
+   */
+  async applyCustomerPricingChange(
+    customerId: string,
+    params: ApplyPricingChangeParams,
+  ): Promise<CustomerPlanChange> {
+    this.assertSecretKey('applyCustomerPricingChange()');
+    return this.request<CustomerPlanChange>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes/pricing`,
+      {
+        method: 'POST',
+        body: JSON.stringify(params),
+      },
+    );
+  }
+
+  /**
+   * Change a single customer's entitlement plan (and/or per-feature
+   * overrides) without grandfathering.
+   *
+   * @param customerId - The Drip customer ID
+   * @param params - Target plan + optional per-feature overrides
+   * @returns The CustomerPlanChange row
+   * @throws {DripError} 404 if customer or plan is missing
+   * @throws {DripError} 400 if the target plan is deactivated
+   *
+   * @example
+   * ```typescript
+   * await drip.applyCustomerEntitlementChange('cust_123', {
+   *   planId: 'plan_pro',
+   *   overrides: {
+   *     search: { dailyLimit: 10000 },
+   *     api_calls: { unlimited: true },
+   *   },
+   *   reason: 'Upgraded tier',
+   * });
+   * ```
+   */
+  async applyCustomerEntitlementChange(
+    customerId: string,
+    params: ApplyEntitlementChangeParams,
+  ): Promise<CustomerPlanChange> {
+    this.assertSecretKey('applyCustomerEntitlementChange()');
+    return this.request<CustomerPlanChange>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes/entitlement`,
+      {
+        method: 'POST',
+        body: JSON.stringify(params),
+      },
+    );
+  }
+
+  /**
+   * List the paginated history of pricing + entitlement changes for a
+   * customer, newest first.
+   *
+   * @param customerId - The Drip customer ID
+   * @param options - Optional pagination (limit max 200, default 50)
+   */
+  async listCustomerPlanChanges(
+    customerId: string,
+    options: ListCustomerPlanChangesOptions = {},
+  ): Promise<ListCustomerPlanChangesResult> {
+    this.assertSecretKey('listCustomerPlanChanges()');
+    const params = new URLSearchParams();
+    if (options.limit !== undefined) params.set('limit', String(options.limit));
+    if (options.offset !== undefined) params.set('offset', String(options.offset));
+    const query = params.toString();
+    const path = `/customers/${encodeURIComponent(customerId)}/plan-changes${query ? `?${query}` : ''}`;
+    return this.request<ListCustomerPlanChangesResult>(path);
+  }
+
+  /**
+   * Retrieve a single plan change by ID.
+   *
+   * @param customerId - The Drip customer ID
+   * @param changeId - The CustomerPlanChange ID
+   * @throws {DripError} 404 if not found
+   */
+  async getCustomerPlanChange(
+    customerId: string,
+    changeId: string,
+  ): Promise<CustomerPlanChange> {
+    this.assertSecretKey('getCustomerPlanChange()');
+    return this.request<CustomerPlanChange>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes/${encodeURIComponent(changeId)}`,
+    );
+  }
+
+  /**
+   * Roll back a plan change, atomically restoring the previous state and
+   * writing an inverse change row to the history for auditability.
+   *
+   * @param customerId - The Drip customer ID
+   * @param changeId - The CustomerPlanChange ID to roll back
+   * @param opts - Optional actor attribution
+   * @returns The newly created inverse change row
+   * @throws {DripError} 404 if the change is missing or belongs to another customer
+   * @throws {DripError} 400 if the change has already been rolled back
+   *
+   * @example
+   * ```typescript
+   * await drip.rollbackCustomerPlanChange('cust_123', 'chg_abc', {
+   *   performedBy: 'admin_alice',
+   * });
+   * ```
+   */
+  async rollbackCustomerPlanChange(
+    customerId: string,
+    changeId: string,
+    opts: { performedBy?: string } = {},
+  ): Promise<CustomerPlanChange> {
+    this.assertSecretKey('rollbackCustomerPlanChange()');
+    return this.request<CustomerPlanChange>(
+      `/customers/${encodeURIComponent(customerId)}/plan-changes/${encodeURIComponent(changeId)}/rollback`,
+      {
+        method: 'POST',
+        body: JSON.stringify(opts),
+      },
+    );
   }
 }
 

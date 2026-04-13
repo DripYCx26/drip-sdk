@@ -610,15 +610,19 @@ export async function processRequest<TRequest extends GenericRequest>(
       : config.metadata;
     const metadata = sanitizeChargeMetadata(rawMetadata, config);
 
-    // Attempt to charge
+    // Attempt to charge (via trackUsage — charge() was removed; trackUsage
+    // still hits POST /usage which creates a charge when a pricing plan
+    // matches the unit type). Cast through unknown because the TrackUsage
+    // response shape is a superset of ChargeResult on the billing path.
     try {
-      const chargeResult = await drip.charge({
+      const trackResult = await drip.trackUsage({
         customerId,
         meter: config.meter,
         quantity,
         idempotencyKey,
         metadata,
       });
+      const chargeResult = trackResult as unknown as ChargeResult;
 
       // Call onCharge callback if provided
       if (config.onCharge) {
