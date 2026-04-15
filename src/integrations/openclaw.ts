@@ -61,47 +61,12 @@ function sanitizeBaseUrl(baseUrl: string): string {
   return baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
 }
 
-function isTelemetryPrimitive(value: unknown): value is string | number | boolean | null {
-  if (value === null) {
-    return true;
-  }
-  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
-}
+import { sanitizeMetadata } from '../sanitize.js';
 
 function sanitizeTelemetryMetadata(
   metadata: Record<string, unknown> | undefined,
 ): Record<string, unknown> {
-  if (!metadata) {
-    return {};
-  }
-
-  const SENSITIVE_KEY_PATTERN =
-    /(authorization|api[_-]?key|secret|password|token|prompt|completion|output|input|request|response|body|cookie|set-cookie)/i;
-
-  const sanitized: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(metadata)) {
-    if (SENSITIVE_KEY_PATTERN.test(key)) {
-      continue;
-    }
-
-    if (!isTelemetryPrimitive(value)) {
-      continue;
-    }
-
-    if (typeof value === 'number' && !Number.isFinite(value)) {
-      continue;
-    }
-
-    if (typeof value === 'string' && value.length > 256) {
-      sanitized[key] = value.slice(0, 256);
-      continue;
-    }
-
-    sanitized[key] = value;
-  }
-
-  return sanitized;
+  return sanitizeMetadata(metadata);
 }
 
 export interface OpenClawBillingOptions {

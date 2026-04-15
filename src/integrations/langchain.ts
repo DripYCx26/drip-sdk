@@ -73,8 +73,7 @@ export const ANTHROPIC_PRICING: Record<string, ModelPricing> = {
   'claude-instant-1.2': { input: 0.8, output: 2.4 },
 } as const;
 
-const SENSITIVE_METADATA_KEY_PATTERN =
-  /(authorization|api[_-]?key|secret|password|token|prompt|completion|output|input|request|response|body|cookie|set-cookie|email|phone|ssn|address|creditcard|card)/i;
+import { sanitizeMetadata as _sanitizeMetadata } from '../sanitize.js';
 
 const DEFAULT_LANGCHAIN_METADATA_ALLOWLIST = [
   'integration',
@@ -123,51 +122,12 @@ function hashText(value: string): string {
   return createHash('sha256').update(value).digest('hex');
 }
 
-function isMetadataPrimitive(value: unknown): value is string | number | boolean | null {
-  if (value === null) {
-    return true;
-  }
-  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
-}
-
 function sanitizeMetadata(
   metadata: Record<string, unknown> | undefined,
   allowlist: ReadonlySet<string>,
   redactKeys: ReadonlySet<string>,
 ): Record<string, unknown> {
-  if (!metadata) {
-    return {};
-  }
-
-  const sanitized: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(metadata)) {
-    const normalizedKey = key.toLowerCase();
-
-    if (!allowlist.has(key) && !allowlist.has(normalizedKey)) {
-      continue;
-    }
-    if (redactKeys.has(key) || redactKeys.has(normalizedKey)) {
-      continue;
-    }
-    if (SENSITIVE_METADATA_KEY_PATTERN.test(key)) {
-      continue;
-    }
-    if (!isMetadataPrimitive(value)) {
-      continue;
-    }
-    if (typeof value === 'number' && !Number.isFinite(value)) {
-      continue;
-    }
-    if (typeof value === 'string' && value.length > 256) {
-      sanitized[key] = value.slice(0, 256);
-      continue;
-    }
-
-    sanitized[key] = value;
-  }
-
-  return sanitized;
+  return _sanitizeMetadata(metadata, { allowlist, redactKeys });
 }
 
 /**

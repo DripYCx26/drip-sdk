@@ -105,7 +105,10 @@ export interface Customer {
   onchainAddress: string | null;
 
   /** Whether this customer is internal-only (usage tracked but not billed) */
-  isInternal?: boolean;
+  isInternal: boolean;
+
+  /** Customer status */
+  status: 'ACTIVE' | 'LOW_BALANCE' | 'PAUSED';
 
   /** Custom metadata */
   metadata: Record<string, unknown> | null;
@@ -720,10 +723,10 @@ import { DripError } from './errors.js';
  * console.log(result.summary);
  * ```
  */
-export class Drip {
-  private readonly apiKey: string;
-  private readonly baseUrl: string;
-  private readonly timeout: number;
+export class DripCore {
+  protected readonly apiKey: string;
+  protected readonly baseUrl: string;
+  protected readonly timeout: number;
 
   /**
    * The type of API key being used.
@@ -794,7 +797,7 @@ export class Drip {
    * Asserts that the SDK was initialized with a secret key (sk_).
    * @internal
    */
-  private assertSecretKey(operation: string): void {
+  protected assertSecretKey(operation: string): void {
     if (this.keyType === 'public') {
       throw new DripError(
         `${operation} requires a secret key (sk_). You are using a public key (pk_), which cannot access this endpoint. ` +
@@ -809,7 +812,7 @@ export class Drip {
    * Makes an authenticated request to the Drip API.
    * @internal
    */
-  private async request<T>(
+  protected async request<T>(
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
@@ -1142,14 +1145,14 @@ export class Drip {
   // Private Workflow Methods (used by recordRun)
   // ==========================================================================
 
-  private async createWorkflow(params: CreateWorkflowParams): Promise<Workflow> {
+  protected async createWorkflow(params: CreateWorkflowParams): Promise<Workflow> {
     return this.request<Workflow>('/workflows', {
       method: 'POST',
       body: JSON.stringify(params),
     });
   }
 
-  private async listWorkflows(): Promise<{ data: Workflow[]; count: number }> {
+  protected async listWorkflows(): Promise<{ data: Workflow[]; count: number }> {
     return this.request<{ data: Workflow[]; count: number }>('/workflows');
   }
 
@@ -1496,8 +1499,14 @@ export class Drip {
   }
 }
 
+/**
+ * Backward-compatible alias — consumers of `@drip-sdk/node/core` can
+ * continue to import `Drip` without changes.
+ */
+export { DripCore as Drip };
+
 // Default export for convenience
-export default Drip;
+export default DripCore;
 
 // ============================================================================
 // Pre-initialized Singleton
@@ -1520,11 +1529,11 @@ export default Drip;
  *
  * @throws {Error} on first use if DRIP_API_KEY is not set
  */
-let _singleton: Drip | null = null;
+let _singleton: DripCore | null = null;
 
-function getSingleton(): Drip {
+function getSingleton(): DripCore {
   if (!_singleton) {
-    _singleton = new Drip();
+    _singleton = new DripCore();
   }
   return _singleton;
 }
@@ -1551,10 +1560,10 @@ function getSingleton(): Drip {
  * });
  * ```
  */
-export const drip: Drip = new Proxy({} as Drip, {
+export const drip: DripCore = new Proxy({} as DripCore, {
   get(_target, prop) {
     const instance = getSingleton();
-    const value = instance[prop as keyof Drip];
+    const value = instance[prop as keyof DripCore];
     if (typeof value === 'function') {
       return value.bind(instance);
     }
