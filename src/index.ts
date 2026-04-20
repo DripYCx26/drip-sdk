@@ -8,6 +8,9 @@
  * @packageDocumentation
  */
 
+// Polyfill fetch for Node.js < 18 and browser compatibility
+import 'isomorphic-fetch';
+
 import { createHash, createHmac, timingSafeEqual, webcrypto } from 'crypto';
 import { StreamMeter, type StreamMeterOptions } from './stream-meter.js';
 import { deterministicIdempotencyKey } from './idempotency.js';
