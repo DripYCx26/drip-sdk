@@ -3566,6 +3566,19 @@ export class Drip {
     // even when callers omit meter/quantity. These match the server defaults.
     const meter = params.meter ?? 'generic';
     const quantity = params.quantity ?? 1;
+    
+
+if (typeof meter !== "string" || meter.trim() === "") {
+  throw new DripError("meter must be a non-empty string", 400, "INVALID_INPUT");
+}
+
+if (typeof quantity !== "number" || quantity <= 0) {
+  throw new DripError("quantity must be a positive number", 400, "INVALID_INPUT");
+}
+
+if (params.mode && !["sync", "batch", "internal"].includes(params.mode)) {
+  throw new DripError("invalid mode", 400, "INVALID_INPUT");
+}
     const idempotencyKey = params.idempotencyKey
       ?? deterministicIdempotencyKey('track', identity, meter, quantity);
     const mode = params.mode ?? 'sync';
