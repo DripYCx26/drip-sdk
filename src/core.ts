@@ -1269,9 +1269,25 @@ export class Drip {
    * }
    * ```
    */
+
   async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
   async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
   async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
+      if (!params.customerId || typeof params.customerId !== "string") {
+  throw new DripError("customerId is required", 400, "INVALID_INPUT")
+}
+
+if (!params.meter || typeof params.meter !== "string") {
+  throw new DripError("meter is required", 400, "INVALID_INPUT")
+}
+
+if (typeof params.quantity !== "number" || params.quantity <= 0) {
+  throw new DripError("quantity must be a positive number", 400, "INVALID_INPUT")
+}
+
+if (params.mode && !["sync", "batch"].includes(params.mode)) {
+  throw new DripError("mode must be 'sync' or 'batch'", 400, "INVALID_INPUT")
+}
     const idempotencyKey = params.idempotencyKey
       ?? deterministicIdempotencyKey('track', params.customerId, params.meter, params.quantity);
     const mode = params.mode ?? 'sync';
