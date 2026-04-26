@@ -3552,70 +3552,83 @@ export class Drip {
    * ```
    */
   async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
-  async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
-  async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
-    const identity = params.customerId ?? params.externalCustomerId;
-    if (!identity) {
-      throw new DripError(
-        'trackUsage(): either customerId or externalCustomerId is required',
-        400,
-        'VALIDATION_ERROR',
-      );
-    }
-    // Apply defaults locally so the deterministic idempotency key is stable
-    // even when callers omit meter/quantity. These match the server defaults.
-    const meter = params.meter ?? 'generic';
-    const quantity = params.quantity ?? 1;
-    
+async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
+async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
+  const identity = params.customerId ?? params.externalCustomerId;
 
-if (typeof meter !== "string" || meter.trim() === "") {
-  throw new DripError("meter must be a non-empty string", 400, "INVALID_INPUT");
-}
-
-if (typeof quantity !== "number" || quantity <= 0) {
-  throw new DripError("quantity must be a positive number", 400, "INVALID_INPUT");
-}
-
-if (params.mode && !["sync", "batch", "internal"].includes(params.mode)) {
-  throw new DripError("invalid mode", 400, "INVALID_INPUT");
-}
-    const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('track', identity, meter, quantity);
-    const mode = params.mode ?? 'sync';
-    // Default path is `/usage` (billing-aware: creates a charge if a pricing
-    // plan matches, otherwise tracks without a charge). `mode: 'batch'` uses
-    // `/usage/async` for fire-and-forget. `mode: 'internal'` opts into the
-    // visibility-only path that never creates charges.
-    const path =
-      mode === 'internal'
-        ? '/usage/internal'
-        : mode === 'batch'
-          ? '/usage/async'
-          : '/usage';
-
-    const result = await this.request<TrackUsageResult>(path, {
-      method: 'POST',
-      body: JSON.stringify({
-        customerId: params.customerId,
-        externalCustomerId: params.externalCustomerId,
-        usageType: meter,
-        quantity,
-        idempotencyKey,
-        units: params.units,
-        description: params.description,
-        metadata: params.metadata,
-      }),
-    });
-
-    if (mode === 'batch') {
-      return {
-        ...(result as TrackUsageBatchResult),
-        mode: 'batch',
-      };
-    }
-
-    return result as TrackUsageSyncResult;
+  if (!identity || typeof identity !== 'string' || identity.trim() === '') {
+    throw new DripError(
+      'trackUsage(): either customerId or externalCustomerId must be a non-empty string',
+      400,
+      'VALIDATION_ERROR'
+    );
   }
+
+
+  const meter = params.meter ?? 'generic';
+  const quantity = params.quantity ?? 1;
+
+
+  if (typeof meter !== 'string' || meter.trim() === '') {
+    throw new DripError(
+      'meter must be a non-empty string',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  if (!Number.isFinite(quantity) || quantity <= 0) {
+    throw new DripError(
+      'quantity must be a positive number',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  if (params.mode && !['sync', 'batch', 'internal'].includes(params.mode)) {
+    throw new DripError(
+      'invalid mode: expected one of sync, batch, internal',
+      400,
+      'VALIDATION_ERROR'
+    );
+  }
+
+  const idempotencyKey =
+    params.idempotencyKey ??
+    deterministicIdempotencyKey('track', identity, meter, quantity);
+
+  const mode = params.mode ?? 'sync';
+
+  const path =
+    mode === 'internal'
+      ? '/usage/internal'
+      : mode === 'batch'
+        ? '/usage/async'
+        : '/usage';
+
+  const result = await this.request<TrackUsageResult>(path, {
+    method: 'POST',
+    body: JSON.stringify({
+      customerId: params.customerId,
+      externalCustomerId: params.externalCustomerId,
+      usageType: meter,
+      quantity,
+      idempotencyKey,
+      units: params.units,
+      description: params.description,
+      metadata: params.metadata,
+    }),
+  });
+
+  if (mode === 'batch') {
+    return {
+      ...(result as TrackUsageBatchResult),
+      mode: 'batch',
+    };
+  }
+
+  return result as TrackUsageSyncResult;
+}
 
   // `chargeAsync()` removed — use `trackUsage({ ..., mode: 'batch' })`.
 
