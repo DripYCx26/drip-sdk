@@ -11,6 +11,17 @@ This **Core SDK** is designed for pilots: it records *what ran* and *how much it
 
 ---
 
+## Languages In This Repo
+
+- [Node.js](./README.md) - published as `@drip-sdk/node` from the repo root
+- [Python](./python/README.md) - published as `drip-sdk` from the `python/` directory
+- [Go](./go/README.md) - a minimal official client built on the same public API
+- [cURL](./curl/README.md) - direct HTTP examples for teams that want zero wrapper code
+
+The npm package still lives at the repository root so the existing Node publish flow stays intact.
+
+---
+
 ## 60-Second Quickstart (Core SDK)
 
 ### 1. Install

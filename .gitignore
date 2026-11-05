@@ -6,3 +6,9 @@ dist/
 .env.local
 coverage/
 .nyc_output/
+python/.pytest_cache/
+python/.mypy_cache/
+python/.ruff_cache/
+python/.coverage
+python/htmlcov/
+go/.cache/
