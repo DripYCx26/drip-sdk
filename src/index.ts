@@ -22,23 +22,69 @@ import {
   createDefaultResilienceConfig,
   createDisabledResilienceConfig,
   createHighThroughputResilienceConfig,
+  calculateBackoff,
+  isRetryableError,
+  type RetryConfig,
 } from './resilience.js';
+import { DripCore } from './core.js';
+
+// Types whose definitions are identical in core.ts are re-exported from there
+// so '@drip-sdk/node' and '@drip-sdk/node/core' cannot drift apart.
+export type {
+  CreateCustomerParams,
+  SpendingCapType,
+  SetSpendingCapParams,
+  CustomerSpendingCap,
+  CheckEntitlementParams,
+  EntitlementCheckResult,
+  PlanChangeType,
+  PlanChangeStatus,
+  PlanChangeProrationDirection,
+  CustomerPlanChange,
+  ListCustomerPlanChangesResult,
+  ListCustomerPlanChangesOptions,
+  StartRunParams,
+  RunResult,
+  EndRunParams,
+  RunStatus,
+  EmitEventParams,
+  EventResult,
+  RecordRunEvent,
+  RecordRunParams,
+  RecordRunResult,
+  RunDetails,
+} from './core.js';
+import type {
+  CreateCustomerParams,
+  SpendingCapType,
+  SetSpendingCapParams,
+  CustomerSpendingCap,
+  CheckEntitlementParams,
+  EntitlementCheckResult,
+  PlanChangeType,
+  PlanChangeStatus,
+  PlanChangeProrationDirection,
+  CustomerPlanChange,
+  ListCustomerPlanChangesResult,
+  ListCustomerPlanChangesOptions,
+  StartRunParams,
+  RunResult,
+  EndRunParams,
+  RunStatus,
+  EmitEventParams,
+  EventResult,
+  RecordRunEvent,
+  RecordRunParams,
+  RecordRunResult,
+  RunDetails,
+} from './core.js';
 
 // ============================================================================
 // Retry Utility
 // ============================================================================
 
 /**
- * Default retry configuration.
- */
-const DEFAULT_RETRY_CONFIG = {
-  maxAttempts: 3,
-  baseDelayMs: 100,
-  maxDelayMs: 5000,
-} as const;
-
-/**
- * Retry options for API calls.
+ * Retry options for API calls (used by `wrapApiCall`).
  */
 export interface RetryOptions {
   /**
@@ -64,65 +110,6 @@ export interface RetryOptions {
    * By default, retries on network errors and 5xx status codes.
    */
   isRetryable?: (error: unknown) => boolean;
-}
-
-/**
- * Default function to determine if an error is retryable.
- */
-function defaultIsRetryable(error: unknown): boolean {
-  // Retry on network errors
-  if (error instanceof Error) {
-    if (error.message.includes('fetch') || error.message.includes('network')) {
-      return true;
-    }
-  }
-
-  // Retry on 5xx errors and timeouts
-  if (error instanceof DripError) {
-    return error.statusCode >= 500 || error.statusCode === 408 || error.statusCode === 429;
-  }
-
-  return false;
-}
-
-/**
- * Executes a function with exponential backoff retry.
- * @internal
- */
-async function retryWithBackoff<T>(
-  fn: () => Promise<T>,
-  options: RetryOptions = {},
-): Promise<T> {
-  const maxAttempts = options.maxAttempts ?? DEFAULT_RETRY_CONFIG.maxAttempts;
-  const baseDelayMs = options.baseDelayMs ?? DEFAULT_RETRY_CONFIG.baseDelayMs;
-  const maxDelayMs = options.maxDelayMs ?? DEFAULT_RETRY_CONFIG.maxDelayMs;
-  const isRetryable = options.isRetryable ?? defaultIsRetryable;
-
-  let lastError: unknown;
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt++) {
-    try {
-      return await fn();
-    } catch (error) {
-      lastError = error;
-
-      // Don't retry if it's the last attempt or error isn't retryable
-      if (attempt === maxAttempts || !isRetryable(error)) {
-        throw error;
-      }
-
-      // Exponential backoff with jitter
-      const delay = Math.min(
-        baseDelayMs * Math.pow(2, attempt - 1) + Math.random() * 100,
-        maxDelayMs,
-      );
-
-      await new Promise((resolve) => setTimeout(resolve, delay));
-    }
-  }
-
-  // Should never reach here, but TypeScript needs it
-  throw lastError;
 }
 
 // ============================================================================
@@ -202,36 +189,6 @@ export interface DripConfig {
 // ============================================================================
 // Customer Types
 // ============================================================================
-
-/**
- * Parameters for creating a new customer.
- */
-export interface CreateCustomerParams {
-  /**
-   * Your internal customer/user ID for reconciliation.
-   * At least one of `externalCustomerId` or `onchainAddress` is required.
-   * @example "user_12345"
-   */
-  externalCustomerId?: string;
-
-  /**
-   * The customer's Drip Smart Account address (derived from their EOA).
-   * At least one of `externalCustomerId` or `onchainAddress` is required.
-   * @example "0x1234567890abcdef..."
-   */
-  onchainAddress?: string;
-
-  /**
-   * Whether this customer is internal-only (usage tracked but not billed).
-   * @default false
-   */
-  isInternal?: boolean;
-
-  /**
-   * Additional metadata to store with the customer.
-   */
-  metadata?: Record<string, unknown>;
-}
 
 /**
  * A Drip customer record.
@@ -319,103 +276,6 @@ export interface BalanceResult {
 
   /** ISO timestamp of last balance sync */
   lastSyncedAt: string | null;
-}
-
-// ============================================================================
-// Customer Spending Cap Types
-// ============================================================================
-
-/** Cap types for per-customer spending limits */
-export type SpendingCapType = 'DAILY_CHARGE_LIMIT' | 'MONTHLY_CHARGE_LIMIT' | 'SINGLE_CHARGE_LIMIT';
-
-/**
- * Parameters for setting a per-customer spending cap.
- */
-export interface SetSpendingCapParams {
-  /** Cap type: daily, monthly, or single-charge limit */
-  capType: SpendingCapType;
-
-  /** Spending limit in USDC */
-  limitValue: number;
-
-  /** Auto-block charges when cap is reached (default: true) */
-  autoBlock?: boolean;
-}
-
-/**
- * A per-customer spending cap with current usage tracking.
- */
-export interface CustomerSpendingCap {
-  /** Cap ID */
-  id: string;
-
-  /** Cap type */
-  capType: string;
-
-  /** Limit value in USDC */
-  limitValue: string;
-
-  /** Current period usage in USDC */
-  currentUsage: string;
-
-  /** Start of the current cap period */
-  periodStart: string;
-
-  /** Whether cap is active */
-  isActive: boolean;
-
-  /** Whether charges are auto-blocked at 100% */
-  autoBlock: boolean;
-
-  /** Last alert level emitted (50, 80, 95, 100) */
-  lastAlertLevel: string | null;
-}
-
-// ============================================================================
-// Entitlement Types
-// ============================================================================
-
-/**
- * Parameters for checking a customer's entitlement to use a feature.
- */
-export interface CheckEntitlementParams {
-  /** The Drip customer ID */
-  customerId: string;
-
-  /** Feature key to check (e.g., "search", "api_calls", "tokens") */
-  featureKey: string;
-
-  /** Quantity to check against the limit (default: 1) */
-  quantity?: number;
-}
-
-/**
- * Result of an entitlement check.
- */
-export interface EntitlementCheckResult {
-  /** Whether the customer is allowed to use this feature */
-  allowed: boolean;
-
-  /** The feature that was checked */
-  featureKey: string;
-
-  /** Remaining quota in the current period (-1 if unlimited) */
-  remaining: number;
-
-  /** The limit for this period (-1 if unlimited) */
-  limit: number;
-
-  /** Whether the customer has unlimited access */
-  unlimited: boolean;
-
-  /** The period this limit applies to */
-  period: 'DAILY' | 'MONTHLY';
-
-  /** When the current period resets (ISO timestamp) */
-  periodResetsAt: string;
-
-  /** Reason for denial (only present when allowed=false) */
-  reason?: string;
 }
 
 // ============================================================================
@@ -623,49 +483,6 @@ export interface ApplyEntitlementChangeParams {
   overrides?: Record<string, PlanChangeEntitlementOverrideInput>;
   reason?: string;
   performedBy?: string;
-}
-
-export type PlanChangeType = 'PRICING' | 'ENTITLEMENT' | 'BOTH';
-export type PlanChangeStatus = 'APPLIED' | 'ROLLED_BACK' | 'SUPERSEDED';
-export type PlanChangeProrationDirection = 'NONE' | 'CREDIT' | 'CHARGE' | 'ZERO';
-
-/**
- * A recorded pricing or entitlement change on a customer. Returned by
- * apply / get / rollback / list operations.
- */
-export interface CustomerPlanChange {
-  id: string;
-  businessId: string;
-  customerId: string;
-  changeType: PlanChangeType;
-  status: PlanChangeStatus;
-  effectiveFrom: string;
-  reason: string | null;
-  previousState: unknown;
-  newState: unknown;
-  prorationAmountUsd: string | null;
-  prorationDirection: PlanChangeProrationDirection | null;
-  proratedDays: number | null;
-  totalPeriodDays: number | null;
-  prorationPeriodStart: string | null;
-  prorationPeriodEnd: string | null;
-  prorationChargeId: string | null;
-  contractId: string | null;
-  performedBy: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/** Response shape for `listCustomerPlanChanges`. */
-export interface ListCustomerPlanChangesResult {
-  data: CustomerPlanChange[];
-  total: number;
-}
-
-/** Pagination options for `listCustomerPlanChanges`. */
-export interface ListCustomerPlanChangesOptions {
-  limit?: number;
-  offset?: number;
 }
 
 // ============================================================================
@@ -1585,124 +1402,6 @@ export interface Workflow {
   createdAt: string;
 }
 
-/**
- * Parameters for starting a new agent run.
- */
-export interface StartRunParams {
-  /** Customer ID this run belongs to */
-  customerId: string;
-
-  /** Workflow ID this run executes */
-  workflowId: string;
-
-  /** Your external run ID for correlation */
-  externalRunId?: string;
-
-  /** Correlation ID for distributed tracing */
-  correlationId?: string;
-
-  /** Parent run ID for nested runs */
-  parentRunId?: string;
-
-  /** Additional metadata */
-  metadata?: Record<string, unknown>;
-}
-
-/**
- * Result of starting a run.
- */
-export interface RunResult {
-  id: string;
-  customerId: string;
-  workflowId: string;
-  workflowName: string;
-  status: RunStatus;
-  correlationId: string | null;
-  createdAt: string;
-}
-
-/**
- * Parameters for ending/updating a run.
- */
-export interface EndRunParams {
-  /** New status for the run */
-  status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMEOUT';
-
-  /** Error message if failed */
-  errorMessage?: string;
-
-  /** Error code for categorization */
-  errorCode?: string;
-
-  /** Additional metadata */
-  metadata?: Record<string, unknown>;
-}
-
-/**
- * Possible run statuses.
- */
-export type RunStatus =
-  | 'PENDING'
-  | 'RUNNING'
-  | 'COMPLETED'
-  | 'FAILED'
-  | 'CANCELLED'
-  | 'TIMEOUT';
-
-/**
- * Parameters for emitting an event to a run.
- */
-export interface EmitEventParams {
-  /** Run ID to attach this event to */
-  runId: string;
-
-  /** Event type (e.g., "agent.step", "rpc.request") */
-  eventType: string;
-
-  /** Quantity of units consumed */
-  quantity?: number;
-
-  /** Human-readable unit label */
-  units?: string;
-
-  /** Human-readable description */
-  description?: string;
-
-  /** Cost in abstract units */
-  costUnits?: number;
-
-  /** Currency for cost */
-  costCurrency?: string;
-
-  /** Correlation ID for tracing */
-  correlationId?: string;
-
-  /** Parent event ID for trace tree */
-  parentEventId?: string;
-
-  /** OpenTelemetry-style span ID */
-  spanId?: string;
-
-  /** Idempotency key (auto-generated if not provided) */
-  idempotencyKey?: string;
-
-  /** Additional metadata */
-  metadata?: Record<string, unknown>;
-}
-
-/**
- * Result of emitting an event.
- */
-export interface EventResult {
-  id: string;
-  runId: string;
-  eventType: string;
-  quantity: number;
-  costUnits: number | null;
-  isDuplicate: boolean;
-  timestamp: string;
-}
-
 // ============================================================================
 // Meter Types
 // ============================================================================
@@ -2016,92 +1715,6 @@ export interface CostEstimateResponse {
 // ============================================================================
 
 /**
- * A single event to record in a run.
- */
-export interface RecordRunEvent {
-  /** Event type (e.g., "agent.step", "tool.call") */
-  eventType: string;
-
-  /** Quantity of units consumed */
-  quantity?: number;
-
-  /** Human-readable unit label */
-  units?: string;
-
-  /** Human-readable description */
-  description?: string;
-
-  /** Cost in abstract units */
-  costUnits?: number;
-
-  /** Additional metadata */
-  metadata?: Record<string, unknown>;
-}
-
-/**
- * Parameters for recording a complete run in one call.
- * This is the simplified API that combines workflow, run, and events.
- */
-export interface RecordRunParams {
-  /** Customer ID this run belongs to */
-  customerId: string;
-
-  /**
-   * Workflow identifier. Can be:
-   * - An existing workflow ID (e.g., "wf_abc123")
-   * - A slug that will be auto-created if it doesn't exist (e.g., "my_agent")
-   */
-  workflow: string;
-
-  /** Events that occurred during the run */
-  events: RecordRunEvent[];
-
-  /** Final status of the run */
-  status: 'COMPLETED' | 'FAILED' | 'CANCELLED' | 'TIMEOUT';
-
-  /** Error message if status is FAILED */
-  errorMessage?: string;
-
-  /** Error code if status is FAILED */
-  errorCode?: string;
-
-  /** Your external run ID for correlation */
-  externalRunId?: string;
-
-  /** Correlation ID for distributed tracing */
-  correlationId?: string;
-
-  /** Additional metadata */
-  metadata?: Record<string, unknown>;
-}
-
-/**
- * Result of recording a run.
- */
-export interface RecordRunResult {
-  /** The created run */
-  run: {
-    id: string;
-    workflowId: string;
-    workflowName: string;
-    status: RunStatus;
-    durationMs: number | null;
-  };
-
-  /** Summary of events created */
-  events: {
-    created: number;
-    duplicates: number;
-  };
-
-  /** Total cost computed */
-  totalCostUnits: string | null;
-
-  /** Human-readable summary */
-  summary: string;
-}
-
-/**
  * Full run timeline response from GET /runs/:id/timeline.
  */
 export interface RunTimeline {
@@ -2163,33 +1776,6 @@ export interface RunTimeline {
   };
   hasMore: boolean;
   nextCursor: string | null;
-}
-
-/**
- * Run details response from GET /runs/:id.
- */
-export interface RunDetails {
-  id: string;
-  customerId: string;
-  customerName: string | null;
-  workflowId: string;
-  workflowName: string;
-  status: RunStatus;
-  startedAt: string | null;
-  endedAt: string | null;
-  durationMs: number | null;
-  errorMessage: string | null;
-  errorCode: string | null;
-  correlationId: string | null;
-  metadata: Record<string, unknown> | null;
-  totals: {
-    eventCount: number;
-    totalQuantity: string;
-    totalCostUnits: string;
-  };
-  _links: {
-    timeline: string;
-  };
 }
 
 // ============================================================================
@@ -2563,20 +2149,8 @@ export interface PayloadMappingIngestResult {
  * console.log(`Charged ${result.charge.amountUsdc} USDC`);
  * ```
  */
-export class Drip {
-  private readonly apiKey: string;
-  private readonly baseUrl: string;
-  private readonly timeout: number;
+export class Drip extends DripCore {
   private readonly resilience: ResilienceManager | null;
-
-  /**
-   * The type of API key being used.
-   *
-   * - `'secret'` — Full access (sk_live_... / sk_test_...)
-   * - `'public'` — Client-safe, restricted access (pk_live_... / pk_test_...)
-   * - `'unknown'` — Key format not recognized (legacy or custom)
-   */
-  readonly keyType: 'secret' | 'public' | 'unknown';
 
   /**
    * Creates a new Drip SDK client.
@@ -2605,40 +2179,7 @@ export class Drip {
    * ```
    */
   constructor(config: DripConfig = {}) {
-    // Read from config or fall back to environment variables
-    const apiKey = config.apiKey ?? (typeof process !== 'undefined' ? process.env.DRIP_API_KEY : undefined);
-    const baseUrl = config.baseUrl ?? (typeof process !== 'undefined' ? (process.env.DRIP_API_URL ?? process.env.DRIP_BASE_URL) : undefined);
-
-    if (!apiKey) {
-      throw new Error(
-        'Drip API key is required. Either pass { apiKey } to constructor or set DRIP_API_KEY environment variable.'
-      );
-    }
-
-    // Validate API key format early so typos are caught at construction time
-    if (!apiKey.startsWith('sk_') && !apiKey.startsWith('pk_')) {
-      throw new Error(
-        `Invalid API key format: key must start with "sk_" (secret) or "pk_" (public). Got "${apiKey.slice(0, 8)}..."`
-      );
-    }
-    if (apiKey.length < 10) {
-      throw new Error(
-        'Invalid API key: key is too short. Check that you copied the full key from the Drip dashboard.'
-      );
-    }
-
-    this.apiKey = apiKey;
-    this.baseUrl = baseUrl || 'https://api.drippay.dev/v1';
-    this.timeout = config.timeout || 30000;
-
-    // Detect key type from prefix
-    if (apiKey.startsWith('sk_')) {
-      this.keyType = 'secret';
-    } else if (apiKey.startsWith('pk_')) {
-      this.keyType = 'public';
-    } else {
-      this.keyType = 'unknown';
-    }
+    super(config);
 
     // Setup resilience manager — enabled by default for production safety.
     // Explicit `false` disables it for testing or low-level control.
@@ -2659,7 +2200,7 @@ export class Drip {
    * Throws a clear error if a public key is being used for a secret-key-only operation.
    * @internal
    */
-  private assertSecretKey(operation: string): void {
+  protected override assertSecretKey(operation: string): void {
     if (this.keyType === 'public') {
       throw new DripError(
         `${operation} requires a secret key (sk_). You are using a public key (pk_), which cannot access this endpoint. ` +
@@ -2674,7 +2215,7 @@ export class Drip {
    * Makes an authenticated request to the Drip API.
    * @internal
    */
-  private async request<T>(
+  protected override async request<T>(
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
@@ -2772,85 +2313,7 @@ export class Drip {
   // Health Check Methods
   // ==========================================================================
 
-  /**
-   * Pings the Drip API to check connectivity and measure latency.
-   *
-   * @returns Health status with latency information
-   * @throws {DripError} If the request fails or times out
-   *
-   * @example
-   * ```typescript
-   * const health = await drip.ping();
-   * if (health.ok) {
-   *   console.log(`API healthy, latency: ${health.latencyMs}ms`);
-   * }
-   * ```
-   */
-  async ping(): Promise<{ ok: boolean; status: string; latencyMs: number; timestamp: number }> {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
-
-    // Safely construct health endpoint URL
-    let healthBaseUrl = this.baseUrl;
-    if (healthBaseUrl.endsWith('/v1/')) {
-      healthBaseUrl = healthBaseUrl.slice(0, -4);
-    } else if (healthBaseUrl.endsWith('/v1')) {
-      healthBaseUrl = healthBaseUrl.slice(0, -3);
-    }
-    healthBaseUrl = healthBaseUrl.replace(/\/+$/, '');
-
-    const start = Date.now();
-
-    try {
-      const response = await fetch(`${healthBaseUrl}/health`, {
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-      });
-      const latencyMs = Date.now() - start;
-
-      // Try to parse JSON, but handle non-JSON responses gracefully
-      let status = 'unknown';
-      let timestamp = Date.now();
-
-      try {
-        const data = await response.json() as { status?: string; timestamp?: number };
-        if (typeof data.status === 'string') {
-          status = data.status;
-        }
-        if (typeof data.timestamp === 'number') {
-          timestamp = data.timestamp;
-        }
-      } catch {
-        // Non-JSON response, derive status from HTTP code
-        status = response.ok ? 'healthy' : `error:${response.status}`;
-      }
-
-      // For non-OK HTTP responses, set appropriate status
-      if (!response.ok && status === 'unknown') {
-        status = `error:${response.status}`;
-      }
-
-      return {
-        ok: response.ok && status === 'healthy',
-        status,
-        latencyMs,
-        timestamp,
-      };
-    } catch (error) {
-      if (error instanceof Error && error.name === 'AbortError') {
-        throw new DripError('Request timed out', 408, 'TIMEOUT');
-      }
-      throw new DripError(
-        error instanceof Error ? error.message : 'Unknown error',
-        0,
-        'UNKNOWN',
-      );
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
+  // ping() is inherited from DripCore.
 
   // ==========================================================================
   // Resilience Methods
@@ -2921,7 +2384,7 @@ export class Drip {
    * });
    * ```
    */
-  async createCustomer(params: CreateCustomerParams): Promise<Customer> {
+  override async createCustomer(params: CreateCustomerParams): Promise<Customer> {
     this.assertSecretKey('createCustomer()');
     return this.request<Customer>('/customers', {
       method: 'POST',
@@ -2942,7 +2405,7 @@ export class Drip {
    * console.log(customer.onchainAddress);
    * ```
    */
-  async getCustomer(customerId: string): Promise<Customer> {
+  override async getCustomer(customerId: string): Promise<Customer> {
     this.assertSecretKey('getCustomer()');
     return this.request<Customer>(`/customers/${customerId}`);
   }
@@ -2965,7 +2428,7 @@ export class Drip {
    * });
    * ```
    */
-  async listCustomers(
+  override async listCustomers(
     options?: ListCustomersOptions,
   ): Promise<ListCustomersResponse> {
     this.assertSecretKey('listCustomers()');
@@ -3055,82 +2518,8 @@ export class Drip {
   // Customer Spending Caps
   // ==========================================================================
 
-  /**
-   * Sets a per-customer spending cap.
-   *
-   * Caps limit how much a single customer can be charged per day, per month,
-   * or per individual charge. Multi-level alerts fire at 50%, 80%, 95%, and
-   * 100% via `customer.spending.warning` / `customer.spending.blocked` webhooks.
-   *
-   * @param customerId - The Drip customer ID
-   * @param params - Cap parameters
-   * @returns The created/updated spending cap
-   *
-   * @example
-   * ```typescript
-   * // Limit customer to $500/month
-   * const cap = await drip.setCustomerSpendingCap('cust_abc123', {
-   *   capType: 'MONTHLY_CHARGE_LIMIT',
-   *   limitValue: 500,
-   *   autoBlock: true,
-   * });
-   * ```
-   */
-  async setCustomerSpendingCap(
-    customerId: string,
-    params: SetSpendingCapParams,
-  ): Promise<CustomerSpendingCap> {
-    this.assertSecretKey('setCustomerSpendingCap()');
-    return this.request<CustomerSpendingCap>(
-      `/customers/${customerId}/spending-cap`,
-      { method: 'PUT', body: JSON.stringify(params) },
-    );
-  }
-
-  /**
-   * Lists all active spending caps for a customer.
-   *
-   * @param customerId - The Drip customer ID
-   * @returns List of active spending caps with current usage
-   *
-   * @example
-   * ```typescript
-   * const { caps } = await drip.getCustomerSpendingCaps('cust_abc123');
-   * for (const cap of caps) {
-   *   console.log(`${cap.capType}: ${cap.currentUsage}/${cap.limitValue} USDC`);
-   * }
-   * ```
-   */
-  async getCustomerSpendingCaps(
-    customerId: string,
-  ): Promise<{ caps: CustomerSpendingCap[] }> {
-    this.assertSecretKey('getCustomerSpendingCaps()');
-    return this.request<{ caps: CustomerSpendingCap[] }>(
-      `/customers/${customerId}/spending-caps`,
-    );
-  }
-
-  /**
-   * Removes a spending cap for a customer.
-   *
-   * @param customerId - The Drip customer ID
-   * @param capId - The spending cap ID to remove
-   *
-   * @example
-   * ```typescript
-   * await drip.removeCustomerSpendingCap('cust_abc123', 'cap_xyz');
-   * ```
-   */
-  async removeCustomerSpendingCap(
-    customerId: string,
-    capId: string,
-  ): Promise<{ success: boolean }> {
-    this.assertSecretKey('removeCustomerSpendingCap()');
-    return this.request<{ success: boolean }>(
-      `/customers/${customerId}/spending-caps/${capId}`,
-      { method: 'DELETE' },
-    );
-  }
+  // setCustomerSpendingCap(), getCustomerSpendingCaps() and
+  // removeCustomerSpendingCap() are inherited from DripCore.
 
   // ==========================================================================
   // Customer Provisioning Methods
@@ -3500,18 +2889,41 @@ export class Drip {
     // Step 3: Record usage in Drip with retry (idempotency makes this safe).
     // Uses trackUsage() instead of the removed charge() method; the backend
     // still creates a charge if a pricing plan matches the unit type.
-    const charge = await retryWithBackoff(
-      () =>
-        this.trackUsage({
+    // Backoff and retryability come from the resilience module; 408 and
+    // every 5xx stay retryable, matching the previous wrapApiCall behavior.
+    const retryConfig: RetryConfig = {
+      maxRetries: (params.retryOptions?.maxAttempts ?? 3) - 1,
+      baseDelayMs: params.retryOptions?.baseDelayMs ?? 100,
+      maxDelayMs: params.retryOptions?.maxDelayMs ?? 5000,
+      exponentialBase: 2,
+      jitter: 0.1,
+      retryableStatusCodes: [408, 429],
+      enabled: true,
+    };
+    const isRetryable = params.retryOptions?.isRetryable
+      ?? ((error: unknown) =>
+        isRetryableError(error, retryConfig)
+        || (error instanceof DripError && error.statusCode >= 500));
+
+    let charge: TrackUsageResult;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        charge = await this.trackUsage({
           customerId: params.customerId,
           externalCustomerId: params.externalCustomerId,
           meter: params.meter,
           quantity,
           idempotencyKey,
           metadata: params.metadata,
-        }),
-      params.retryOptions,
-    );
+        });
+        break;
+      } catch (error) {
+        if (attempt >= retryConfig.maxRetries || !isRetryable(error)) {
+          throw error;
+        }
+        await new Promise((resolve) => setTimeout(resolve, calculateBackoff(attempt, retryConfig)));
+      }
+    }
 
     return {
       result,
@@ -3759,43 +3171,7 @@ export class Drip {
   // Entitlement Methods (Quota Management)
   // ==========================================================================
 
-  /**
-   * Check if a customer is allowed to use a feature based on their entitlement plan.
-   *
-   * Use this before processing expensive requests to avoid wasting compute
-   * on customers who are over their quota.
-   *
-   * @param params - Entitlement check parameters
-   * @returns Whether the customer is allowed, with remaining quota info
-   *
-   * @example
-   * ```typescript
-   * const result = await drip.checkEntitlement({
-   *   customerId: 'cust_abc123',
-   *   featureKey: 'search',
-   *   quantity: 1,
-   * });
-   *
-   * if (!result.allowed) {
-   *   return res.status(429).json({
-   *     error: 'Quota exceeded',
-   *     remaining: result.remaining,
-   *     resetsAt: result.periodResetsAt,
-   *   });
-   * }
-   * ```
-   */
-  async checkEntitlement(params: CheckEntitlementParams): Promise<EntitlementCheckResult> {
-    this.assertSecretKey('checkEntitlement()');
-    return this.request<EntitlementCheckResult>('/entitlements/check', {
-      method: 'POST',
-      body: JSON.stringify({
-        customerId: params.customerId,
-        featureKey: params.featureKey,
-        quantity: params.quantity ?? 1,
-      }),
-    });
-  }
+  // checkEntitlement() is inherited from DripCore.
 
   // ==========================================================================
   // Customer Plan Changes — per-customer pricing + entitlement swaps
@@ -3805,110 +3181,9 @@ export class Drip {
   // All methods require a secret key.
   // ==========================================================================
 
-  /**
-   * Change a single customer's pricing without creating a new global plan.
-   *
-   * @param customerId - The Drip customer ID
-   * @param params - What to change (at least one field required)
-   * @returns A CustomerPlanChange row with audit + proration details
-   *
-   * @example
-   * ```typescript
-   * await drip.applyCustomerPricingChange('cust_123', {
-   *   sourcePricingPlanIds: ['plan_pro_api'],
-   *   discountPct: '15',
-   *   prorate: true,
-   *   reason: 'Upgraded after sales call',
-   * });
-   * ```
-   */
-  async applyCustomerPricingChange(
-    customerId: string,
-    params: ApplyPricingChangeParams,
-  ): Promise<CustomerPlanChange> {
-    this.assertSecretKey('applyCustomerPricingChange()');
-    return this.request<CustomerPlanChange>(
-      `/customers/${encodeURIComponent(customerId)}/plan-changes/pricing`,
-      {
-        method: 'POST',
-        body: JSON.stringify(params),
-      },
-    );
-  }
-
-  /**
-   * Change a single customer's entitlement plan (and/or per-feature overrides)
-   * without grandfathering.
-   *
-   * @example
-   * ```typescript
-   * await drip.applyCustomerEntitlementChange('cust_123', {
-   *   planId: 'plan_pro',
-   *   overrides: { search: { dailyLimit: 10000 } },
-   * });
-   * ```
-   */
-  async applyCustomerEntitlementChange(
-    customerId: string,
-    params: ApplyEntitlementChangeParams,
-  ): Promise<CustomerPlanChange> {
-    this.assertSecretKey('applyCustomerEntitlementChange()');
-    return this.request<CustomerPlanChange>(
-      `/customers/${encodeURIComponent(customerId)}/plan-changes/entitlement`,
-      {
-        method: 'POST',
-        body: JSON.stringify(params),
-      },
-    );
-  }
-
-  /**
-   * List the paginated history of pricing + entitlement changes for a
-   * customer, newest first.
-   */
-  async listCustomerPlanChanges(
-    customerId: string,
-    options: ListCustomerPlanChangesOptions = {},
-  ): Promise<ListCustomerPlanChangesResult> {
-    this.assertSecretKey('listCustomerPlanChanges()');
-    const params = new URLSearchParams();
-    if (options.limit !== undefined) params.set('limit', String(options.limit));
-    if (options.offset !== undefined) params.set('offset', String(options.offset));
-    const query = params.toString();
-    return this.request<ListCustomerPlanChangesResult>(
-      `/customers/${encodeURIComponent(customerId)}/plan-changes${query ? `?${query}` : ''}`,
-    );
-  }
-
-  /** Retrieve a single plan change by ID. */
-  async getCustomerPlanChange(
-    customerId: string,
-    changeId: string,
-  ): Promise<CustomerPlanChange> {
-    this.assertSecretKey('getCustomerPlanChange()');
-    return this.request<CustomerPlanChange>(
-      `/customers/${encodeURIComponent(customerId)}/plan-changes/${encodeURIComponent(changeId)}`,
-    );
-  }
-
-  /**
-   * Roll back a plan change, atomically restoring the previous state and
-   * writing an inverse change row to the history.
-   */
-  async rollbackCustomerPlanChange(
-    customerId: string,
-    changeId: string,
-    opts: { performedBy?: string } = {},
-  ): Promise<CustomerPlanChange> {
-    this.assertSecretKey('rollbackCustomerPlanChange()');
-    return this.request<CustomerPlanChange>(
-      `/customers/${encodeURIComponent(customerId)}/plan-changes/${encodeURIComponent(changeId)}/rollback`,
-      {
-        method: 'POST',
-        body: JSON.stringify(opts),
-      },
-    );
-  }
+  // applyCustomerPricingChange(), applyCustomerEntitlementChange(),
+  // getCustomerPlanChange(), rollbackCustomerPlanChange() and
+  // listCustomerPlanChanges() are inherited from DripCore.
 
   // ==========================================================================
   // Checkout Methods (Fiat On-Ramp)
@@ -4497,6 +3772,8 @@ export class Drip {
   // Run & Event Methods (Execution Ledger)
   // ==========================================================================
 
+  // startRun(), getRun(), emitEvent() and endRun() are inherited from DripCore.
+
   /**
    * Creates a new workflow definition.
    *
@@ -4512,7 +3789,7 @@ export class Drip {
    * });
    * ```
    */
-  async createWorkflow(params: CreateWorkflowParams): Promise<Workflow> {
+  override async createWorkflow(params: CreateWorkflowParams): Promise<Workflow> {
     return this.request<Workflow>('/workflows', {
       method: 'POST',
       body: JSON.stringify(params),
@@ -4524,90 +3801,8 @@ export class Drip {
    *
    * @returns List of workflows
    */
-  async listWorkflows(): Promise<{ data: Workflow[]; count: number }> {
+  override async listWorkflows(): Promise<{ data: Workflow[]; count: number }> {
     return this.request<{ data: Workflow[]; count: number }>('/workflows');
-  }
-
-  /**
-   * Starts a new agent run for tracking execution.
-   *
-   * @param params - Run parameters
-   * @returns The started run
-   *
-   * @example
-   * ```typescript
-   * const run = await drip.startRun({
-   *   customerId: 'cust_abc123',
-   *   workflowId: 'wf_xyz789',
-   *   correlationId: 'req_unique_123',
-   * });
-   *
-   * // Emit events during execution...
-   *
-   * await drip.endRun(run.id, { status: 'COMPLETED' });
-   * ```
-   */
-  async startRun(params: StartRunParams): Promise<RunResult> {
-    return this.request<RunResult>('/runs', {
-      method: 'POST',
-      body: JSON.stringify(params),
-    });
-  }
-
-  /**
-   * Ends a run with a final status.
-   *
-   * @param runId - The run ID to end
-   * @param params - End parameters including status
-   * @returns Updated run info
-   *
-   * @example
-   * ```typescript
-   * await drip.endRun(run.id, {
-   *   status: 'COMPLETED',
-   * });
-   *
-   * // Or with error:
-   * await drip.endRun(run.id, {
-   *   status: 'FAILED',
-   *   errorMessage: 'Customer validation failed',
-   *   errorCode: 'VALIDATION_ERROR',
-   * });
-   * ```
-   */
-  async endRun(
-    runId: string,
-    params: EndRunParams,
-  ): Promise<{
-    id: string;
-    status: RunStatus;
-    endedAt: string | null;
-    durationMs: number | null;
-    eventCount: number;
-    totalCostUnits: string | null;
-  }> {
-    return this.request(`/runs/${runId}`, {
-      method: 'PATCH',
-      body: JSON.stringify(params),
-    });
-  }
-
-  /**
-   * Gets run details with summary totals.
-   *
-   * For full event history with retry chains and anomalies, use `getRunTimeline()`.
-   *
-   * @param runId - The run ID
-   * @returns Run details with totals
-   *
-   * @example
-   * ```typescript
-   * const run = await drip.getRun('run_abc123');
-   * console.log(`Status: ${run.status}, Events: ${run.totals.eventCount}`);
-   * ```
-   */
-  async getRun(runId: string): Promise<RunDetails> {
-    return this.request<RunDetails>(`/runs/${runId}`);
   }
 
   /**
@@ -4631,7 +3826,7 @@ export class Drip {
    * }
    * ```
    */
-  async getRunTimeline(
+  override async getRunTimeline(
     runId: string,
     options?: { limit?: number; cursor?: string; includeAnomalies?: boolean; collapseRetries?: boolean },
   ): Promise<RunTimeline> {
@@ -4645,37 +3840,6 @@ export class Drip {
     const path = query ? `/runs/${runId}/timeline?${query}` : `/runs/${runId}/timeline`;
 
     return this.request<RunTimeline>(path);
-  }
-
-  /**
-   * Emits an event to a run.
-   *
-   * Each event is assigned a unique idempotency key (auto-generated if not provided).
-   * This maps each inference or API call to a single trackable event.
-   * Use `Drip.generateIdempotencyKey()` for deterministic key generation.
-   *
-   * @param params - Event parameters
-   * @returns The created event
-   *
-   * @example
-   * ```typescript
-   * await drip.emitEvent({
-   *   runId: run.id,
-   *   eventType: 'agent.validate',
-   *   quantity: 1,
-   *   description: 'Validated prescription format',
-   *   costUnits: 0.001,
-   * });
-   * ```
-   */
-  async emitEvent(params: EmitEventParams): Promise<EventResult> {
-    const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('evt', params.runId, params.eventType, params.quantity);
-
-    return this.request<EventResult>('/run-events', {
-      method: 'POST',
-      body: JSON.stringify({ ...params, idempotencyKey }),
-    });
   }
 
   /**
@@ -4694,7 +3858,7 @@ export class Drip {
    * console.log(`Created: ${result.created}, Duplicates: ${result.duplicates}`);
    * ```
    */
-  async emitEventsBatch(
+  override async emitEventsBatch(
     events: Array<Omit<EmitEventParams, 'runId'> & {
       runId?: string;
       customerId?: string;
@@ -4723,6 +3887,8 @@ export class Drip {
   // ==========================================================================
   // Simplified API Methods
   // ==========================================================================
+
+  // recordRun() is inherited from DripCore.
 
   /**
    * Lists all available meters (usage types) for your business.
@@ -5065,167 +4231,6 @@ export class Drip {
         customPricing: params.customPricing,
       }),
     });
-  }
-
-  /**
-   * Records a complete agent run in a single call.
-   *
-   * This is the **simplified API** that combines:
-   * - Workflow creation (if needed)
-   * - Run creation
-   * - Event emission
-   * - Run completion
-   *
-   * Use this instead of the individual `startRun()`, `emitEvent()`, `endRun()` calls
-   * when you have all the run data available at once.
-   *
-   * @param params - Run parameters including events
-   * @returns The created run with event summary
-   *
-   * @example
-   * ```typescript
-   * // Record a complete agent run in one call
-   * const result = await drip.recordRun({
-   *   customerId: 'cust_123',
-   *   workflow: 'doc_processing',  // Auto-creates if doesn't exist
-   *   events: [
-   *     { eventType: 'agent.start', description: 'Started processing' },
-   *     { eventType: 'tool.ocr', quantity: 3, units: 'pages', costUnits: 0.15 },
-   *     { eventType: 'tool.validate', quantity: 1, costUnits: 0.05 },
-   *     { eventType: 'agent.complete', description: 'Finished successfully' },
-   *   ],
-   *   status: 'COMPLETED',
-   * });
-   *
-   * console.log(`Run ${result.run.id}: ${result.summary}`);
-   * console.log(`Events: ${result.events.created} created`);
-   * ```
-   *
-   * @example
-   * ```typescript
-   * // Record a failed run with error details
-   * const result = await drip.recordRun({
-   *   customerId: 'cust_123',
-   *   workflow: 'doc_processing',
-   *   events: [
-   *     { eventType: 'agent.start', description: 'Started processing' },
-   *     { eventType: 'tool.ocr', quantity: 1, units: 'pages' },
-   *     { eventType: 'error', description: 'OCR failed: image too blurry' },
-   *   ],
-   *   status: 'FAILED',
-   *   errorMessage: 'OCR processing failed',
-   *   errorCode: 'OCR_QUALITY_ERROR',
-   * });
-   * ```
-   */
-  async recordRun(params: RecordRunParams): Promise<RecordRunResult> {
-    // Try single-call endpoint first; fall back to 4-step orchestration
-    // if the server doesn't support it yet (404).
-    try {
-      return await this.request<RecordRunResult>('/runs/record', {
-        method: 'POST',
-        body: JSON.stringify({
-          customerId: params.customerId,
-          workflow: params.workflow,
-          events: params.events,
-          status: params.status,
-          errorMessage: params.errorMessage,
-          errorCode: params.errorCode,
-          externalRunId: params.externalRunId,
-          correlationId: params.correlationId,
-          metadata: params.metadata,
-        }),
-      });
-    } catch (err) {
-      if (err instanceof DripError && err.statusCode === 404) {
-        return this._recordRunFallback(params);
-      }
-      throw err;
-    }
-  }
-
-  /**
-   * 4-step orchestration fallback for servers without POST /runs/record.
-   * @internal
-   */
-  private async _recordRunFallback(params: RecordRunParams): Promise<RecordRunResult> {
-    const startTime = Date.now();
-
-    // Step 1: Resolve workflow
-    let workflowId = params.workflow;
-    let workflowName = params.workflow;
-    const { data: workflows } = await this.listWorkflows();
-    const match = workflows.find(
-      (w) => w.slug === params.workflow || w.id === params.workflow,
-    );
-    if (match) {
-      workflowId = match.id;
-      workflowName = match.name;
-    } else {
-      const created = await this.request<Workflow>('/workflows', {
-        method: 'POST',
-        body: JSON.stringify({
-          name: params.workflow.replace(/[_-]/g, ' ').replace(/\b\w/g, (c) => c.toUpperCase()),
-          slug: params.workflow,
-          productSurface: 'CUSTOM',
-        }),
-      });
-      workflowId = created.id;
-      workflowName = created.name;
-    }
-
-    // Step 2: Start run
-    const run = await this.startRun({
-      customerId: params.customerId,
-      workflowId,
-      correlationId: params.correlationId,
-      externalRunId: params.externalRunId,
-      metadata: params.metadata,
-    });
-
-    // Step 3: Emit events
-    let eventsCreated = 0;
-    let eventsDuplicates = 0;
-    if (params.events.length > 0) {
-      const batchEvents = params.events.map((evt, i) => ({
-        runId: run.id,
-        eventType: evt.eventType,
-        quantity: evt.quantity ?? 1,
-        units: evt.units,
-        description: evt.description,
-        costUnits: evt.costUnits,
-        metadata: evt.metadata,
-        idempotencyKey: params.externalRunId
-          ? `${params.externalRunId}:${evt.eventType}:${i}`
-          : undefined,
-      }));
-      const batchResult = await this.emitEventsBatch(batchEvents);
-      eventsCreated = batchResult.created;
-      eventsDuplicates = batchResult.duplicates;
-    }
-
-    // Step 4: End run
-    const endResult = await this.endRun(run.id, {
-      status: params.status,
-      errorMessage: params.errorMessage,
-      errorCode: params.errorCode,
-    });
-
-    const durationMs = Date.now() - startTime;
-    const statusIcon = params.status === 'COMPLETED' ? '\u2713' : params.status === 'FAILED' ? '\u2717' : '\u25CB';
-
-    return {
-      run: {
-        id: run.id,
-        workflowId,
-        workflowName,
-        status: endResult.status,
-        durationMs: endResult.durationMs ?? durationMs,
-      },
-      events: { created: eventsCreated, duplicates: eventsDuplicates },
-      totalCostUnits: endResult.totalCostUnits ?? null,
-      summary: `${statusIcon} ${workflowName}: ${eventsCreated} events recorded (${endResult.durationMs ?? durationMs}ms)`,
-    };
   }
 
   /**
