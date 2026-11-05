@@ -8,6 +8,9 @@
  * @packageDocumentation
  */
 
+// Polyfill fetch for Node.js < 18 and browser compatibility
+import 'isomorphic-fetch';
+
 import { createHash, createHmac, timingSafeEqual, webcrypto } from 'crypto';
 import { StreamMeter, type StreamMeterOptions } from './stream-meter.js';
 import { deterministicIdempotencyKey } from './idempotency.js';
@@ -25,62 +28,55 @@ import {
 } from './resilience.js';
 import { DripCore } from './core.js';
 
-// Re-export shared types from core so consumers of '@drip-sdk/node' get them.
+// Types whose definitions are identical in core.ts are re-exported from there
+// so '@drip-sdk/node' and '@drip-sdk/node/core' cannot drift apart.
 export type {
   CreateCustomerParams,
-  ListCustomersResponse,
-  TrackUsageMode,
-  TrackUsageParams,
-  TrackUsageSyncParams,
-  TrackUsageBatchParams,
-  TrackUsageSyncResult,
-  TrackUsageBatchResult,
-  TrackUsageResult,
-  StartRunParams,
-  RunStatus,
-  RunResult,
-  EndRunParams,
-  EmitEventParams,
-  EventResult,
-  RecordRunEvent,
-  RecordRunParams,
-  RecordRunResult,
-  RunTimeline,
-  RunDetails,
   SpendingCapType,
   SetSpendingCapParams,
   CustomerSpendingCap,
   CheckEntitlementParams,
   EntitlementCheckResult,
+  PlanChangeType,
+  PlanChangeStatus,
+  PlanChangeProrationDirection,
+  CustomerPlanChange,
+  ListCustomerPlanChangesResult,
+  ListCustomerPlanChangesOptions,
+  StartRunParams,
+  RunResult,
+  EndRunParams,
+  RunStatus,
+  EmitEventParams,
+  EventResult,
+  RecordRunEvent,
+  RecordRunParams,
+  RecordRunResult,
+  RunDetails,
 } from './core.js';
-
-// Import types from core for use in this module.
 import type {
   CreateCustomerParams,
-  ListCustomersResponse,
-  TrackUsageMode,
-  TrackUsageParams,
-  TrackUsageSyncParams,
-  TrackUsageBatchParams,
-  TrackUsageSyncResult,
-  TrackUsageBatchResult,
-  TrackUsageResult,
-  StartRunParams,
-  RunStatus,
-  RunResult,
-  EndRunParams,
-  EmitEventParams,
-  EventResult,
-  RecordRunEvent,
-  RecordRunParams,
-  RecordRunResult,
-  RunTimeline,
-  RunDetails,
   SpendingCapType,
   SetSpendingCapParams,
   CustomerSpendingCap,
   CheckEntitlementParams,
   EntitlementCheckResult,
+  PlanChangeType,
+  PlanChangeStatus,
+  PlanChangeProrationDirection,
+  CustomerPlanChange,
+  ListCustomerPlanChangesResult,
+  ListCustomerPlanChangesOptions,
+  StartRunParams,
+  RunResult,
+  EndRunParams,
+  RunStatus,
+  EmitEventParams,
+  EventResult,
+  RecordRunEvent,
+  RecordRunParams,
+  RecordRunResult,
+  RunDetails,
 } from './core.js';
 
 // ============================================================================
@@ -134,10 +130,9 @@ export interface DripConfig {
    *
    * Supports both key types:
    * - **Secret keys** (`sk_live_...` / `sk_test_...`): Full access to all endpoints
-   * - **Public keys** (`pk_live_...` / `pk_test_...`): Safe for client-side use only
-   *   in browser-safe flows. They cannot access administrative billing endpoints
-   *   like customers, charges, events, pricing plans, subscriptions, or entitlement checks.
-   *   Cannot access webhook management, API key management, or feature flags.
+   * - **Public keys** (`pk_live_...` / `pk_test_...`): Client-safe identifiers only.
+   *   The onboarding, billing, run/event, pricing-plan, subscription, webhook,
+   *   and entitlement flows in this SDK should use a secret key.
    *
    * @example "sk_live_abc123..." or "pk_live_abc123..."
    */
@@ -247,6 +242,17 @@ export interface ListCustomersOptions {
    * Filter by customer status.
    */
   status?: 'ACTIVE' | 'LOW_BALANCE' | 'PAUSED';
+}
+
+/**
+ * Response from listing customers.
+ */
+export interface ListCustomersResponse {
+  /** Array of customers */
+  data: Customer[];
+
+  /** Total count returned */
+  count: number;
 }
 
 /**
@@ -429,6 +435,57 @@ export interface CreateContractOverrideParams {
 }
 
 // ============================================================================
+// Customer Plan Change Types
+// ============================================================================
+
+/** A single per-unit price override (what a customer pays for one unit type). */
+export interface PlanChangePriceOverrideInput {
+  unitType: string;
+  unitPriceUsd: string;
+}
+
+/** Per-feature entitlement override. */
+export interface PlanChangeEntitlementOverrideInput {
+  dailyLimit?: number;
+  monthlyLimit?: number;
+  unlimited?: boolean;
+}
+
+/**
+ * Parameters for `applyCustomerPricingChange`. Accepts any combination of
+ * source pricing plan IDs, explicit overrides, and commercial terms. At
+ * least one field is required.
+ */
+export interface ApplyPricingChangeParams {
+  sourcePricingPlanIds?: string[];
+  priceOverrides?: PlanChangePriceOverrideInput[];
+  replaceAll?: boolean;
+  discountPct?: string;
+  minimumUsdc?: string;
+  maximumUsdc?: string;
+  includedUnits?: Record<string, number>;
+  prorate?: boolean;
+  /**
+   * Exact net proration amount to use instead of computing from the
+   * subscription delta. Sign encodes direction: positive = CHARGE,
+   * negative = CREDIT, "0" = ZERO. Use for multi-unit changes where
+   * summing override prices would produce a meaningless baseline.
+   */
+  prorationAmountOverride?: string;
+  effectiveDate?: string;
+  reason?: string;
+  performedBy?: string;
+}
+
+/** Parameters for `applyCustomerEntitlementChange`. */
+export interface ApplyEntitlementChangeParams {
+  planId: string;
+  overrides?: Record<string, PlanChangeEntitlementOverrideInput>;
+  reason?: string;
+  performedBy?: string;
+}
+
+// ============================================================================
 // Usage & Charge Types
 // ============================================================================
 
@@ -438,8 +495,23 @@ export interface CreateContractOverrideParams {
 export interface ChargeParams {
   /**
    * The Drip customer ID to charge.
+   *
+   * Either `customerId` or `externalCustomerId` is required. If you pass
+   * `externalCustomerId` instead, Drip will look up (or auto-provision) the
+   * matching customer on first use.
    */
-  customerId: string;
+  customerId?: string;
+
+  /**
+   * Your own database's customer ID. Use this if you'd rather not round-trip
+   * through `POST /customers` first — on first use, Drip auto-provisions an
+   * internal customer for the pair `(business, externalCustomerId)` and
+   * billing proceeds against it.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
+   * @example "user_42"
+   */
+  externalCustomerId?: string;
 
   /**
    * The usage meter/type to record against.
@@ -509,7 +581,179 @@ export type ChargeStatus =
   | 'FAILED'
   | 'REFUNDED';
 
-// TrackUsage types re-exported from core.ts above.
+/**
+ * trackUsage dispatch mode.
+ *
+ * - `sync` (default) → `POST /usage` (billing-aware: creates a charge if a
+ *   pricing plan matches the unit type, otherwise records without charging).
+ * - `batch` → `POST /usage/async` (queued, returns 202 immediately).
+ * - `internal` → `POST /usage/internal` (visibility-only; never bills).
+ */
+export type TrackUsageMode = 'batch' | 'sync' | 'internal';
+
+/**
+ * Parameters for tracking usage without billing.
+ * Use this for internal visibility, pilots, or pre-billing tracking.
+ *
+ * **Minimum viable payload:** only `customerId` is required. `meter` defaults
+ * to `"generic"` and `quantity` defaults to `1` on the server side, so you
+ * can start emitting events with zero ceremony:
+ *
+ * ```ts
+ * await drip.trackUsage({ customerId: customer.id });
+ * ```
+ */
+export interface TrackUsageParams {
+  /**
+   * The Drip customer ID to track usage for.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
+   * @example "cust_abc123"
+   */
+  customerId?: string;
+
+  /**
+   * Your own database's customer ID. If no Drip customer exists yet for this
+   * external ID, one is auto-provisioned as an internal customer on first
+   * use — no need to call `createCustomer()` first.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
+   * @example "user_42"
+   */
+  externalCustomerId?: string;
+
+  /**
+   * The meter/usage type (e.g., 'api_calls', 'tokens').
+   * Optional — defaults to `"generic"` when omitted.
+   */
+  meter?: string;
+
+  /**
+   * The quantity of usage to record.
+   * Optional — defaults to `1` when omitted.
+   */
+  quantity?: number;
+
+  /**
+   * Unique key to prevent duplicate records.
+   */
+  idempotencyKey?: string;
+
+  /**
+   * Human-readable unit label (e.g., 'tokens', 'requests').
+   */
+  units?: string;
+
+  /**
+   * Human-readable description of this usage event.
+   */
+  description?: string;
+
+  /**
+   * Additional metadata to attach to this usage event.
+   */
+  metadata?: Record<string, unknown>;
+
+  /**
+   * Write mode for usage tracking.
+   *
+   * - `sync` (default): `POST /usage` — billing-aware. If a pricing plan
+   *   matches the unit type, a charge is created and batch-settled on-chain
+   *   when the threshold is met.
+   * - `batch`: `POST /usage/async` — queued, returns 202 immediately. Use
+   *   when you need fast response times and can handle eventual consistency
+   *   via webhooks.
+   * - `internal`: `POST /usage/internal` — visibility-only, never bills.
+   *   Use for internal dashboards / quotas / rate limiting that should not
+   *   create charges.
+   */
+  mode?: TrackUsageMode;
+}
+
+export type TrackUsageSyncParams = TrackUsageParams & { mode?: 'sync' };
+export type TrackUsageBatchParams = Omit<TrackUsageParams, 'mode'> & { mode: 'batch' };
+
+interface BaseTrackUsageResult {
+  /** Whether the usage was recorded */
+  success: boolean;
+
+  /** Customer ID */
+  customerId: string;
+
+  /** Usage type that was recorded */
+  usageType: string;
+
+  /** Quantity recorded */
+  quantity: number;
+
+  /** Confirmation message */
+  message: string;
+
+  /**
+   * When the request was recorded on the internal/visibility path
+   * instead of as an on-chain charge. Present on both the default
+   * `mode: 'sync'` and `mode: 'batch'` paths when the customer has
+   * no on-chain address or is marked `isInternal: true`.
+   */
+  mode?: 'internal';
+
+  /**
+   * True when `POST /usage` auto-promoted to `/usage/internal` because
+   * the customer has no on-chain address. False for customers already
+   * marked `isInternal: true` (they stay on the internal path but
+   * weren't "promoted" — they were never eligible for billing). Absent
+   * when the request landed on the regular billing path.
+   */
+  autoPromoted?: boolean;
+
+  /**
+   * Human-readable explanation of why the request was routed to the
+   * internal path. Present whenever `mode === 'internal'`.
+   */
+  reason?: string;
+}
+
+/**
+ * Result of tracking usage synchronously (legacy/default behavior).
+ */
+export interface TrackUsageSyncResult extends BaseTrackUsageResult {
+  /** The usage event ID */
+  usageEventId: string;
+
+  /** Whether this customer is internal-only */
+  isInternal: boolean;
+}
+
+/**
+ * Result of tracking usage in batch mode.
+ *
+ * Note: the `mode` field is widened in BaseTrackUsageResult to accept
+ * the server's `'internal'` marker for auto-promoted requests. The
+ * batch-specific marker `'batch'` is the only value emitted by the
+ * SDK's own client-side synthesis on the batch path, so the two are
+ * kept in a discriminated union via the optional `mode` field.
+ */
+export interface TrackUsageBatchResult extends Omit<BaseTrackUsageResult, 'mode'> {
+  /** Explicit batch mode marker */
+  mode: 'batch' | 'internal';
+
+  /** Whether this customer is internal-only, when returned by the API */
+  isInternal?: undefined;
+
+  /** Idempotency key for queued batch writes */
+  idempotencyKey: string;
+
+  /** Number of pending queued events for batch writes */
+  pendingEvents: number;
+
+  /** Not assigned until the event is flushed */
+  usageEventId?: undefined;
+}
+
+/**
+ * Result of tracking usage (no billing).
+ */
+export type TrackUsageResult = TrackUsageSyncResult | TrackUsageBatchResult;
 
 /**
  * A detailed charge record.
@@ -1158,9 +1402,6 @@ export interface Workflow {
   createdAt: string;
 }
 
-// StartRunParams, RunResult, EndRunParams, RunStatus, EmitEventParams, EventResult
-// re-exported from core.ts above.
-
 // ============================================================================
 // Meter Types
 // ============================================================================
@@ -1191,6 +1432,154 @@ export interface Meter {
 export interface ListMetersResponse {
   /** Array of available meters */
   data: Meter[];
+
+  /** Total count */
+  count: number;
+}
+
+// ============================================================================
+// Pricing Plan Types
+// ============================================================================
+
+/**
+ * Supported pricing models.
+ *
+ * - `FLAT` — single `unitPriceUsd` applied to every unit.
+ * - `TIERED` — graduated pricing; each tier applies only to units within its range.
+ * - `VOLUME` — entire quantity priced at the single tier that contains it.
+ * - `PACKAGE` — bundled billing; quantity rounded up to nearest `packageSize`.
+ * - `PER_SEAT` — per-user/seat pricing; `unitPriceUsd` is price per seat per period.
+ */
+export type PricingModel = 'FLAT' | 'TIERED' | 'VOLUME' | 'PACKAGE' | 'PER_SEAT';
+
+/**
+ * A pricing tier within a TIERED, VOLUME, or PACKAGE plan.
+ */
+export interface PricingTier {
+  /** Tier ID */
+  id: string;
+
+  /** Minimum quantity for this tier (inclusive) */
+  minQuantity: string;
+
+  /** Maximum quantity for this tier (exclusive), or null for unbounded */
+  maxQuantity: string | null;
+
+  /** Price per unit in USD for this tier */
+  unitPriceUsd: string;
+
+  /** Optional flat fee in USD applied once when this tier is entered */
+  flatFeeUsd: string | null;
+
+  /** For PACKAGE model: number of units per package */
+  packageSize: number | null;
+}
+
+/**
+ * A tier input when creating or updating a pricing plan.
+ */
+export interface PricingTierInput {
+  /** Minimum quantity for this tier (inclusive, starts at 0) */
+  minQuantity: number;
+
+  /** Maximum quantity for this tier (exclusive), or null for unbounded (last tier) */
+  maxQuantity?: number | null;
+
+  /** Price per unit in USD for this tier */
+  unitPriceUsd: number;
+
+  /** Optional flat fee in USD */
+  flatFeeUsd?: number | null;
+
+  /** For PACKAGE model: number of units per package */
+  packageSize?: number | null;
+}
+
+/**
+ * A full pricing plan record.
+ */
+export interface PricingPlan {
+  /** Pricing plan ID */
+  id: string;
+
+  /** Human-readable name */
+  name: string;
+
+  /** The usage type this plan prices (e.g., "api_call", "token") */
+  unitType: string;
+
+  /** Price per unit in USD (string for decimal precision) */
+  unitPriceUsd: string;
+
+  /** Currency (always "USDC") */
+  currency: string;
+
+  /** Whether this plan is active */
+  isActive: boolean;
+
+  /** Pricing model */
+  pricingModel: PricingModel;
+
+  /** Pricing tiers (empty for FLAT and PER_SEAT models) */
+  tiers: PricingTier[];
+
+  /** ISO 8601 creation timestamp */
+  createdAt: string;
+
+  /** ISO 8601 last-updated timestamp */
+  updatedAt: string;
+}
+
+/**
+ * Parameters for creating a new pricing plan.
+ */
+export interface CreatePricingPlanParams {
+  /** Human-readable name */
+  name: string;
+
+  /** Usage type this plan prices (e.g., "api_call", "token", "compute_second") */
+  unitType: string;
+
+  /** Price per unit in USD (max 6 decimal places, e.g., 0.001) */
+  unitPriceUsd: number;
+
+  /** Whether this plan is active (default: true) */
+  isActive?: boolean;
+
+  /** Pricing model (default: "FLAT") */
+  pricingModel?: PricingModel;
+
+  /** Pricing tiers (required for TIERED, VOLUME, PACKAGE; must be empty for FLAT, PER_SEAT) */
+  tiers?: PricingTierInput[];
+}
+
+/**
+ * Parameters for updating an existing pricing plan.
+ * Price-affecting changes (unitPriceUsd, pricingModel, tiers) create a new version.
+ */
+export interface UpdatePricingPlanParams {
+  /** Updated plan name */
+  name?: string;
+
+  /** Updated price per unit in USD */
+  unitPriceUsd?: number;
+
+  /** Enable or disable the plan */
+  isActive?: boolean;
+
+  /** Change the pricing model (requires tiers if switching to TIERED/VOLUME/PACKAGE) */
+  pricingModel?: PricingModel;
+
+  /** Replace plan tiers (required when switching to tier-based models) */
+  tiers?: PricingTierInput[];
+}
+
+/**
+ * Response from listing pricing plans.
+ */
+export interface ListPricingPlansResponse {
+  /** Array of pricing plans */
+  data: PricingPlan[];
 
   /** Total count */
   count: number;
@@ -1325,8 +1714,69 @@ export interface CostEstimateResponse {
 // Record Run Types (Simplified API)
 // ============================================================================
 
-// RecordRunEvent, RecordRunParams, RecordRunResult, RunTimeline, RunDetails
-// re-exported from core.ts above.
+/**
+ * Full run timeline response from GET /runs/:id/timeline.
+ */
+export interface RunTimeline {
+  runId: string;
+  workflowId: string | null;
+  workflowName: string | null;
+  customerId: string;
+  status: RunStatus;
+  correlationId: string | null;
+  metadata: Record<string, unknown> | null;
+  errorMessage: string | null;
+  errorCode: string | null;
+  startedAt: string | null;
+  endedAt: string | null;
+  durationMs: number | null;
+  events: Array<{
+    id: string;
+    eventType: string;
+    actionName: string | null;
+    outcome: 'SUCCESS' | 'FAILED' | 'PENDING' | 'TIMEOUT' | 'RETRYING';
+    explanation: string | null;
+    description: string | null;
+    timestamp: string;
+    durationMs: number | null;
+    parentEventId: string | null;
+    retryOfEventId: string | null;
+    attemptNumber: number;
+    retriedByEventId: string | null;
+    costUsdc: string | null;
+    isRetry: boolean;
+    retryChain: {
+      totalAttempts: number;
+      finalOutcome: string;
+      events: string[];
+    } | null;
+    metadata: {
+      usageType: string;
+      quantity: number;
+      units: string | null;
+    } | null;
+  }>;
+  anomalies: Array<{
+    id: string;
+    type: string;
+    severity: 'LOW' | 'MEDIUM' | 'HIGH' | 'CRITICAL';
+    title: string;
+    explanation: string;
+    relatedEventIds: string[];
+    detectedAt: string;
+    status: 'OPEN' | 'INVESTIGATING' | 'RESOLVED' | 'FALSE_POSITIVE' | 'IGNORED';
+  }>;
+  summary: {
+    totalEvents: number;
+    byType: Record<string, number>;
+    byOutcome: Record<string, number>;
+    retriedEvents: number;
+    failedEvents: number;
+    totalCostUsdc: string | null;
+  };
+  hasMore: boolean;
+  nextCursor: string | null;
+}
 
 // ============================================================================
 // Wrap API Call Types
@@ -1339,8 +1789,18 @@ export interface CostEstimateResponse {
 export interface WrapApiCallParams<T> {
   /**
    * The Drip customer ID to charge.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
    */
-  customerId: string;
+  customerId?: string;
+
+  /**
+   * Your own database's customer ID. First use auto-provisions an internal
+   * Drip customer — no need to call `createCustomer()` first.
+   *
+   * Either `customerId` or `externalCustomerId` is required.
+   */
+  externalCustomerId?: string;
 
   /**
    * The usage meter/type to record against.
@@ -1576,331 +2036,86 @@ export interface EventTrace {
 }
 
 // ============================================================================
-// Pricing Plan Types
+// Payload Mapping Engine
 // ============================================================================
 
-/** Pricing model for a plan. */
-export type PricingModel = 'FLAT' | 'TIERED' | 'VOLUME' | 'PACKAGE' | 'PER_SEAT';
-
 /**
- * A pricing tier within a tiered/volume/package plan.
+ * A declarative transform from an arbitrary customer JSON shape into Drip's
+ * canonical usage event. Created once via `createPayloadMapping`, then
+ * referenced by slug in `POST /v1/ingest/:sourceName`.
  */
-export interface PricingTier {
-  minQuantity: number;
-  maxQuantity: number | null;
-  unitPriceUsd: number;
-  flatFeeUsd: number | null;
-  unitPrice: number | null;
-  flatFee: number | null;
-  packageSize: number | null;
-}
-
-/**
- * Parameters for creating a pricing plan.
- */
-export interface CreatePricingPlanParams {
-  /** Human-readable plan name */
-  name: string;
-  /** Usage type identifier (e.g., "api_calls", "tokens") */
-  unitType: string;
-  /** Price per unit in USD */
-  unitPriceUsd: number;
-  /** Currency (default: USD) */
-  currency?: string;
-  /** Whether the plan is active (default: true) */
-  isActive?: boolean;
-  /** Pricing model (default: FLAT) */
-  pricingModel?: PricingModel;
-  /** Tiers for tiered/volume/package pricing */
-  tiers?: PricingTier[];
-}
-
-/**
- * Parameters for updating a pricing plan.
- */
-export interface UpdatePricingPlanParams {
-  /** Updated plan name */
-  name?: string;
-  /** Updated unit price */
-  unitPriceUsd?: number;
-  /** Updated currency */
-  currency?: string;
-  /** Enable/disable */
-  isActive?: boolean;
-  /** Updated pricing model */
-  pricingModel?: PricingModel;
-  /** Updated tiers */
-  tiers?: PricingTier[];
-}
-
-/**
- * A pricing plan.
- */
-export interface PricingPlan {
+export interface PayloadMapping {
   id: string;
+  businessId: string;
   name: string;
-  unitType: string;
-  unitPriceUsd: string;
-  currency: string;
+  /** URL-safe slug, unique per business. Used as `:mappingSlug` in ingest. */
+  sourceName: string;
+  sampleInput: Record<string, unknown> | null;
+  transformRules: Record<string, unknown>;
+  targetUnitType: string;
+  /** Restricted JSONPath expression resolving to a numeric quantity. */
+  targetQuantityPath: string;
+  /** Restricted JSONPath expression resolving to a Drip customer ID. */
+  targetCustomerIdPath: string;
+  /** Optional path for the idempotency key; Drip auto-generates a fallback otherwise. */
+  targetIdempotencyPath: string | null;
+  /** Map of metadata key → JSONPath expression. */
+  targetMetadataMap: Record<string, string> | null;
+  /** Optional literal `actionName` applied to every transformed event. */
+  targetActionName: string | null;
   isActive: boolean;
-  pricingModel: PricingModel;
-  tiers: PricingTier[];
   createdAt: string;
   updatedAt: string;
 }
 
 /**
- * Response from listing pricing plans.
+ * An immutable historical snapshot of a {@link PayloadMapping}. A new version
+ * is appended on every update for audit and rollback.
  */
-export interface ListPricingPlansResponse {
-  data: PricingPlan[];
-  count: number;
-}
-
-// ============================================================================
-// Invoice Types
-// ============================================================================
-
-/** Invoice status. */
-export type InvoiceStatus = 'DRAFT' | 'PENDING' | 'PAID' | 'PARTIALLY_PAID' | 'VOIDED' | 'OVERDUE';
-
-/**
- * Parameters for generating an invoice from charges.
- */
-export interface GenerateInvoiceParams {
-  /** Customer ID */
-  customerId: string;
-  /** Period start (ISO 8601) */
-  periodStart: string;
-  /** Period end (ISO 8601) */
-  periodEnd: string;
-  /** Due date (ISO 8601, optional) */
-  dueDate?: string;
-  /** Only include settled charges */
-  includeSettledOnly?: boolean;
-  /** Internal notes */
-  notes?: string;
-  /** Customer-facing notes */
-  customerNotes?: string;
-}
-
-/**
- * Parameters for generating an invoice from a subscription.
- */
-export interface GenerateSubscriptionInvoiceParams {
-  /** Customer ID */
-  customerId: string;
-  /** Subscription ID */
-  subscriptionId: string;
-  /** Period start (ISO 8601, optional) */
-  periodStart?: string;
-  /** Period end (ISO 8601, optional) */
-  periodEnd?: string;
-  /** Due date (ISO 8601, optional) */
-  dueDate?: string;
-  /** Internal notes */
-  notes?: string;
-  /** Customer-facing notes */
-  customerNotes?: string;
-  /** Include usage charges in addition to subscription fee */
-  includeUsageCharges?: boolean;
-}
-
-/**
- * An invoice record.
- */
-export interface Invoice {
+export interface PayloadMappingVersion {
   id: string;
-  customerId: string;
-  status: InvoiceStatus;
-  totalUsdc: string;
-  paidUsdc: string;
-  periodStart: string | null;
-  periodEnd: string | null;
-  dueDate: string | null;
-  notes: string | null;
-  customerNotes: string | null;
-  lineItems: InvoiceLineItem[];
-  issuedAt: string | null;
-  paidAt: string | null;
-  voidedAt: string | null;
-  voidReason: string | null;
-  createdAt: string;
-  updatedAt: string;
-}
-
-/**
- * A line item on an invoice.
- */
-export interface InvoiceLineItem {
-  description: string;
-  quantity: string;
-  unitPrice: string;
-  amountUsdc: string;
-  usageType: string | null;
-  chargeId: string | null;
-}
-
-/**
- * Options for listing invoices.
- */
-export interface ListInvoicesOptions {
-  /** Filter by customer ID */
-  customerId?: string;
-  /** Filter by status */
-  status?: InvoiceStatus;
-  /** Filter by start date (ISO 8601) */
-  startDate?: string;
-  /** Filter by end date (ISO 8601) */
-  endDate?: string;
-  /** Max results (1-100, default 100) */
-  limit?: number;
-  /** Offset for pagination */
-  offset?: number;
-}
-
-/**
- * Response from listing invoices.
- */
-export interface ListInvoicesResponse {
-  data: Invoice[];
-  total: number;
-  hasMore: boolean;
-}
-
-/**
- * Invoice summary statistics.
- */
-export interface InvoiceSummary {
-  totalInvoices: number;
-  totalAmountUsdc: string;
-  paidAmountUsdc: string;
-  pendingAmountUsdc: string;
-  overdueAmountUsdc: string;
-  byStatus: Record<string, number>;
-}
-
-// ============================================================================
-// Charge Refund Types
-// ============================================================================
-
-/** Refund reason for a charge. */
-export type RefundReason = 'customer_request' | 'merchant_error' | 'fraud_reversal';
-
-/**
- * Parameters for refunding a charge.
- */
-export interface RefundChargeParams {
-  /** Reason for the refund */
-  reason: RefundReason;
-  /** Optional note */
-  note?: string;
-}
-
-/**
- * Result of a charge refund.
- */
-export interface RefundResult {
-  id: string;
-  customerId: string;
-  usageId: string;
-  amountUsdc: string;
-  amountToken: string;
-  status: 'REFUNDED' | 'REFUND_PENDING';
-  refundReason: string;
-  refundNote: string | null;
-  refundTxHash: string;
-  refundedAt: string | null;
+  mappingId: string;
+  businessId: string;
+  version: number;
+  name: string;
+  sourceName: string;
+  sampleInput: Record<string, unknown> | null;
+  transformRules: Record<string, unknown>;
+  targetUnitType: string;
+  targetQuantityPath: string;
+  targetCustomerIdPath: string;
+  targetIdempotencyPath: string | null;
+  targetMetadataMap: Record<string, string> | null;
+  targetActionName: string | null;
+  createdBy: string | null;
   createdAt: string;
 }
 
-// ============================================================================
-// Webhook Delivery Types
-// ============================================================================
-
-/** Status of a webhook delivery attempt. */
-export type WebhookDeliveryStatus = 'DELIVERED' | 'FAILED' | 'PENDING';
-
-/**
- * A webhook delivery record.
- */
-export interface WebhookDelivery {
-  id: string;
-  eventType: string;
-  eventId: string;
-  status: WebhookDeliveryStatus;
-  attempts: number;
-  responseCode: number | null;
-  errorMessage: string | null;
-  createdAt: string;
-  lastAttemptAt: string | null;
+export interface CreatePayloadMappingParams {
+  name: string;
+  sourceName: string;
+  sampleInput?: Record<string, unknown>;
+  transformRules?: Record<string, unknown>;
+  targetUnitType: string;
+  targetQuantityPath: string;
+  targetCustomerIdPath: string;
+  targetIdempotencyPath?: string;
+  targetMetadataMap?: Record<string, string>;
+  targetActionName?: string;
+  isActive?: boolean;
 }
 
-/**
- * Response from listing webhook deliveries.
- */
-export interface ListWebhookDeliveriesResponse {
-  data: WebhookDelivery[];
-  count: number;
+export type UpdatePayloadMappingParams = Partial<CreatePayloadMappingParams>;
+
+export interface PayloadMappingDryRunResult {
+  /** The `CreateEventInput` Drip would record against this mapping. */
+  event: Record<string, unknown>;
 }
 
-// ============================================================================
-// Checkout Session Types (Get/Pay)
-// ============================================================================
-
-/**
- * Payment method info for a checkout session.
- */
-export interface CheckoutPaymentMethod {
-  method: 'ACH' | 'DEBIT_CARD' | 'CREDIT_CARD' | 'USDC';
-  feeCents: number;
-  feePercent: number;
-  netUsdc: number;
-  estimatedTime: string;
-}
-
-/**
- * Detailed checkout session info.
- */
-export interface CheckoutSession {
-  sessionId: string;
-  amountCents: number;
-  amountUsd: number;
-  expiresAt: string;
-  status: string;
-  paymentMethods: CheckoutPaymentMethod[];
-  depositAddress: string | null;
-}
-
-// ============================================================================
-// Entitlement Usage Summary Types
-// ============================================================================
-
-/**
- * Entitlement usage summary for a customer.
- */
-export interface EntitlementUsageSummary {
-  customerId: string;
-  planId: string;
-  planName: string;
-  usage: Record<string, { used: number; limit: number; remaining: number; period: string; resetsAt: string }>;
-}
-
-// ============================================================================
-// Correlation Trace Types
-// ============================================================================
-
-/**
- * Trace result for a correlation ID, grouping events by run.
- */
-export interface CorrelationTrace {
-  correlationId: string;
-  runs: Array<{
-    runId: string;
-    workflowName: string | null;
-    status: string;
-    events: ExecutionEvent[];
-  }>;
+export interface PayloadMappingIngestResult {
+  event: Record<string, unknown>;
+  /** True when the idempotency key matched an existing event. */
+  replayed: boolean;
 }
 
 // ============================================================================
@@ -1981,27 +2196,46 @@ export class Drip extends DripCore {
   }
 
   /**
-   * Makes an authenticated request to the Drip API with resilience.
-   * Overrides the base class to add rate limiting, retry, and circuit breaker.
+   * Asserts that the SDK was initialized with a secret key (sk_).
+   * Throws a clear error if a public key is being used for a secret-key-only operation.
+   * @internal
+   */
+  protected override assertSecretKey(operation: string): void {
+    if (this.keyType === 'public') {
+      throw new DripError(
+        `${operation} requires a secret key (sk_). You are using a public key (pk_), which cannot access this endpoint. ` +
+        `Use a secret key for administrative billing, customer, pricing, subscription, and webhook operations.`,
+        403,
+        'PUBLIC_KEY_NOT_ALLOWED',
+      );
+    }
+  }
+
+  /**
+   * Makes an authenticated request to the Drip API.
    * @internal
    */
   protected override async request<T>(
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
+    // Extract method for metrics
+    const method = (options.method ?? 'GET').toUpperCase();
+
+    // Use resilience manager if enabled
     if (this.resilience) {
-      const method = (options.method ?? 'GET').toUpperCase();
       return this.resilience.execute(
         () => this.rawRequest<T>(path, options),
         method,
-        path,
+        path
       );
     }
+
     return this.rawRequest<T>(path, options);
   }
 
   /**
-   * Execute the actual HTTP request with enhanced error handling.
+   * Execute the actual HTTP request (internal).
    * @internal
    */
   private async rawRequest<T>(
@@ -2054,6 +2288,9 @@ export class Drip extends DripCore {
         throw new DripError(message, res.status, code, data);
       }
 
+      // The generic T is the caller's expected shape. We trust the backend
+      // contract here — runtime validation belongs at the API boundary
+      // (backend Zod schemas), not in the SDK hot path.
       return data as T;
     } catch (error) {
       if (error instanceof DripError) {
@@ -2071,6 +2308,10 @@ export class Drip extends DripCore {
       clearTimeout(timeoutId);
     }
   }
+
+  // ==========================================================================
+  // Health Check Methods
+  // ==========================================================================
 
   // ping() is inherited from DripCore.
 
@@ -2127,7 +2368,47 @@ export class Drip extends DripCore {
   // Customer Methods
   // ==========================================================================
 
-  // createCustomer() and getCustomer() are inherited from DripCore.
+  /**
+   * Creates a new customer in your Drip account.
+   *
+   * @param params - Customer creation parameters
+   * @returns The created customer
+   * @throws {DripError} If creation fails (e.g., duplicate customer)
+   *
+   * @example
+   * ```typescript
+   * const customer = await drip.createCustomer({
+   *   onchainAddress: '0x1234567890abcdef...',
+   *   externalCustomerId: 'user_123',
+   *   metadata: { plan: 'pro' },
+   * });
+   * ```
+   */
+  override async createCustomer(params: CreateCustomerParams): Promise<Customer> {
+    this.assertSecretKey('createCustomer()');
+    return this.request<Customer>('/customers', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Retrieves a customer by their Drip ID.
+   *
+   * @param customerId - The Drip customer ID
+   * @returns The customer details
+   * @throws {DripError} If customer not found (404)
+   *
+   * @example
+   * ```typescript
+   * const customer = await drip.getCustomer('cust_abc123');
+   * console.log(customer.onchainAddress);
+   * ```
+   */
+  override async getCustomer(customerId: string): Promise<Customer> {
+    this.assertSecretKey('getCustomer()');
+    return this.request<Customer>(`/customers/${customerId}`);
+  }
 
   /**
    * Lists all customers for your business.
@@ -2147,7 +2428,7 @@ export class Drip extends DripCore {
    * });
    * ```
    */
-  async listCustomers(
+  override async listCustomers(
     options?: ListCustomersOptions,
   ): Promise<ListCustomersResponse> {
     this.assertSecretKey('listCustomers()');
@@ -2237,8 +2518,8 @@ export class Drip extends DripCore {
   // Customer Spending Caps
   // ==========================================================================
 
-  // setCustomerSpendingCap(), getCustomerSpendingCaps(), removeCustomerSpendingCap()
-  // are inherited from DripCore.
+  // setCustomerSpendingCap(), getCustomerSpendingCaps() and
+  // removeCustomerSpendingCap() are inherited from DripCore.
 
   // ==========================================================================
   // Customer Provisioning Methods
@@ -2490,51 +2771,22 @@ export class Drip extends DripCore {
   }
 
   // ==========================================================================
-  // Charge Methods
+  // Charge Methods — REMOVED
   // ==========================================================================
-
-  /**
-   * Records usage and charges a customer.
-   *
-   * This is the primary method for billing customers. It:
-   * 1. Records the usage event
-   * 2. Calculates the charge based on your pricing plan
-   * 3. Creates a charge that batch-settles on-chain when the threshold is met
-   *
-   * @param params - Charge parameters
-   * @returns The charge result
-   * @throws {DripError} If charge fails (insufficient balance, invalid customer, etc.)
-   *
-   * @example
-   * ```typescript
-   * const result = await drip.charge({
-   *   customerId: 'cust_abc123',
-   *   meter: 'api_calls',
-   *   quantity: 100,
-   *   idempotencyKey: 'req_unique_123',
-   * });
-   *
-   * if (result.success) {
-   *   console.log(`Charged ${result.charge.amountUsdc} USDC`);
-   *   console.log(`TX: ${result.charge.txHash}`);
-   * }
-   * ```
-   */
-  async charge(params: ChargeParams): Promise<ChargeResult> {
-    const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('chg', params.customerId, params.meter, params.quantity);
-
-    return this.request<ChargeResult>('/usage', {
-      method: 'POST',
-      body: JSON.stringify({
-        customerId: params.customerId,
-        usageType: params.meter,
-        quantity: params.quantity,
-        idempotencyKey,
-        metadata: params.metadata,
-      }),
-    });
-  }
+  // `charge()` and `chargeAsync()` were removed. All usage should flow through
+  // `trackUsage()`, which records the event and lets the backend decide
+  // whether to create a billable charge (based on the pricing plan) and when
+  // to batch-settle on-chain. Direct "charge" semantics are a server concern,
+  // not a client concern.
+  //
+  // Migration:
+  //   drip.charge({ customerId, meter, quantity })
+  //     → drip.trackUsage({ customerId, meter, quantity })
+  //
+  //   drip.chargeAsync({ customerId, meter, quantity })
+  //     → drip.trackUsage({ customerId, meter, quantity, mode: 'batch' })
+  //
+  // `getCharge()` / `listCharges()` remain for read-only reconciliation.
 
   /**
    * Wraps an external API call with guaranteed usage recording.
@@ -2612,13 +2864,21 @@ export class Drip extends DripCore {
    * ```
    */
   async wrapApiCall<T>(params: WrapApiCallParams<T>): Promise<WrapApiCallResult<T>> {
+    const identity = params.customerId ?? params.externalCustomerId;
+    if (!identity) {
+      throw new DripError(
+        'wrapApiCall(): either customerId or externalCustomerId is required',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
     // Generate idempotency key BEFORE the call - this is the key insight!
     // Even if we crash after the API call, retrying with the same key is safe.
-    // CRIT-09: Deterministic key — no Date.now() or Math.random().
-    // quantity isn't known until after the call, so we use customerId + meter.
-    // The monotonic counter in deterministicIdempotencyKey ensures uniqueness.
+    // CRIT-09: Process-scoped deterministic key with startup entropy + counter.
+    // quantity isn't known until after the call, so we use identity + meter.
+    // Startup entropy plus monotonic counter ensures uniqueness across cold starts.
     const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('wrap', params.customerId, params.meter);
+      ?? deterministicIdempotencyKey('wrap', identity, params.meter);
 
     // Step 1: Make the external API call (no retry - we don't control this)
     const result = await params.call();
@@ -2627,27 +2887,30 @@ export class Drip extends DripCore {
     const quantity = params.extractUsage(result);
 
     // Step 3: Record usage in Drip with retry (idempotency makes this safe).
-    // Uses calculateBackoff/isRetryableError from the resilience module
-    // instead of a separate retry implementation.
-    const maxAttempts = params.retryOptions?.maxAttempts ?? 3;
+    // Uses trackUsage() instead of the removed charge() method; the backend
+    // still creates a charge if a pricing plan matches the unit type.
+    // Backoff and retryability come from the resilience module; 408 and
+    // every 5xx stay retryable, matching the previous wrapApiCall behavior.
     const retryConfig: RetryConfig = {
-      maxRetries: maxAttempts - 1,
+      maxRetries: (params.retryOptions?.maxAttempts ?? 3) - 1,
       baseDelayMs: params.retryOptions?.baseDelayMs ?? 100,
       maxDelayMs: params.retryOptions?.maxDelayMs ?? 5000,
       exponentialBase: 2,
       jitter: 0.1,
-      retryableStatusCodes: [429, 500, 502, 503, 504],
+      retryableStatusCodes: [408, 429],
       enabled: true,
     };
     const isRetryable = params.retryOptions?.isRetryable
-      ?? ((error: unknown) => isRetryableError(error, retryConfig));
+      ?? ((error: unknown) =>
+        isRetryableError(error, retryConfig)
+        || (error instanceof DripError && error.statusCode >= 500));
 
-    let charge!: ChargeResult;
-    let lastError: unknown;
-    for (let attempt = 0; attempt <= retryConfig.maxRetries; attempt++) {
+    let charge: TrackUsageResult;
+    for (let attempt = 0; ; attempt++) {
       try {
-        charge = await this.charge({
+        charge = await this.trackUsage({
           customerId: params.customerId,
+          externalCustomerId: params.externalCustomerId,
           meter: params.meter,
           quantity,
           idempotencyKey,
@@ -2655,63 +2918,108 @@ export class Drip extends DripCore {
         });
         break;
       } catch (error) {
-        lastError = error;
-        if (attempt === retryConfig.maxRetries || !isRetryable(error)) {
+        if (attempt >= retryConfig.maxRetries || !isRetryable(error)) {
           throw error;
         }
-        const delay = calculateBackoff(attempt, retryConfig);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await new Promise((resolve) => setTimeout(resolve, calculateBackoff(attempt, retryConfig)));
       }
     }
 
     return {
       result,
-      charge,
+      charge: charge as unknown as ChargeResult,
       idempotencyKey,
     };
   }
 
-  // trackUsage() is inherited from DripCore.
-
   /**
-   * Charges a customer asynchronously — returns immediately with 202.
+   * Records usage for internal visibility WITHOUT billing.
    *
-   * The charge is queued for background processing. Subscribe to
-   * `charge.succeeded` / `charge.failed` webhooks for final status.
+   * Use this for:
+   * - Tracking internal team usage without charging
+   * - Pilot programs where you want visibility before billing
+   * - Pre-billing tracking before customer has on-chain wallet
    *
-   * Use this when you need fast response times and can handle
-   * eventual consistency via webhooks.
+   * This does NOT:
+   * - Create a Charge record
+   * - Require customer balance
+   * - Require blockchain/wallet setup
    *
-   * @param params - Same parameters as `charge()`
-   * @returns Accepted result with queued charge details
+   * For billing, use `charge()` instead.
+   *
+   * @param params - The usage tracking parameters
+   * @returns The tracked usage event
    *
    * @example
    * ```typescript
-   * const result = await drip.chargeAsync({
+   * const result = await drip.trackUsage({
    *   customerId: 'cust_abc123',
-   *   meter: 'tokens',
-   *   quantity: 1500,
+   *   meter: 'api_calls',
+   *   quantity: 100,
+   *   description: 'API calls during trial period',
    * });
    *
-   * console.log(`Queued: ${result.charge.id}`);
-   * // Listen for webhooks to get final status
+   * if (result.mode === 'sync') {
+   *   console.log(`Tracked: ${result.usageEventId}`);
+   * } else {
+   *   console.log(`Queued with key: ${result.idempotencyKey}`);
+   * }
    * ```
    */
-  async chargeAsync(params: ChargeParams): Promise<ChargeAsyncResult> {
+  async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
+  async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
+  async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
+    const identity = params.customerId ?? params.externalCustomerId;
+    if (!identity) {
+      throw new DripError(
+        'trackUsage(): either customerId or externalCustomerId is required',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    // Apply defaults locally so the deterministic idempotency key is stable
+    // even when callers omit meter/quantity. These match the server defaults.
+    const meter = params.meter ?? 'generic';
+    const quantity = params.quantity ?? 1;
     const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('chg-async', params.customerId, params.meter, params.quantity);
+      ?? deterministicIdempotencyKey('track', identity, meter, quantity);
+    const mode = params.mode ?? 'sync';
+    // Default path is `/usage` (billing-aware: creates a charge if a pricing
+    // plan matches, otherwise tracks without a charge). `mode: 'batch'` uses
+    // `/usage/async` for fire-and-forget. `mode: 'internal'` opts into the
+    // visibility-only path that never creates charges.
+    const path =
+      mode === 'internal'
+        ? '/usage/internal'
+        : mode === 'batch'
+          ? '/usage/async'
+          : '/usage';
 
-    return this.request<ChargeAsyncResult>('/usage/async', {
+    const result = await this.request<TrackUsageResult>(path, {
       method: 'POST',
       body: JSON.stringify({
         customerId: params.customerId,
-        usageType: params.meter,
-        quantity: params.quantity,
+        externalCustomerId: params.externalCustomerId,
+        usageType: meter,
+        quantity,
         idempotencyKey,
+        units: params.units,
+        description: params.description,
         metadata: params.metadata,
       }),
     });
+
+    if (mode === 'batch') {
+      return {
+        ...(result as TrackUsageBatchResult),
+        mode: 'batch',
+      };
+    }
+
+    return result as TrackUsageSyncResult;
   }
+
+  // `chargeAsync()` removed — use `trackUsage({ ..., mode: 'batch' })`.
 
   /**
    * Lists execution events with optional filters.
@@ -2863,11 +3171,19 @@ export class Drip extends DripCore {
   // Entitlement Methods (Quota Management)
   // ==========================================================================
 
-  /**
-   * Check if a customer is allowed to use a feature based on their entitlement plan.
-   *
-   * Use this before processing expensive requests to avoid wasting compute
-   * on customers who are over their quota. Inherited from DripCore.
+  // checkEntitlement() is inherited from DripCore.
+
+  // ==========================================================================
+  // Customer Plan Changes — per-customer pricing + entitlement swaps
+  //
+  // Eliminates the need to grandfather customers on old plans. Every apply
+  // call captures a full audit snapshot that can be rolled back.
+  // All methods require a secret key.
+  // ==========================================================================
+
+  // applyCustomerPricingChange(), applyCustomerEntitlementChange(),
+  // getCustomerPlanChange(), rollbackCustomerPlanChange() and
+  // listCustomerPlanChanges() are inherited from DripCore.
 
   // ==========================================================================
   // Checkout Methods (Fiat On-Ramp)
@@ -3456,6 +3772,8 @@ export class Drip extends DripCore {
   // Run & Event Methods (Execution Ledger)
   // ==========================================================================
 
+  // startRun(), getRun(), emitEvent() and endRun() are inherited from DripCore.
+
   /**
    * Creates a new workflow definition.
    *
@@ -3471,7 +3789,7 @@ export class Drip extends DripCore {
    * });
    * ```
    */
-  async createWorkflow(params: CreateWorkflowParams): Promise<Workflow> {
+  override async createWorkflow(params: CreateWorkflowParams): Promise<Workflow> {
     return this.request<Workflow>('/workflows', {
       method: 'POST',
       body: JSON.stringify(params),
@@ -3483,51 +3801,46 @@ export class Drip extends DripCore {
    *
    * @returns List of workflows
    */
-  async listWorkflows(): Promise<{ data: Workflow[]; count: number }> {
+  override async listWorkflows(): Promise<{ data: Workflow[]; count: number }> {
     return this.request<{ data: Workflow[]; count: number }>('/workflows');
   }
 
-  // startRun() is inherited from DripCore.
-
   /**
-   * Ends a run with a final status.
+   * Gets a run's full timeline with events, anomalies, and analytics.
    *
-   * @param runId - The run ID to end
-   * @param params - End parameters including status
-   * @returns Updated run info
+   * This is the key endpoint for debugging "what happened" in an execution.
+   *
+   * @param runId - The run ID
+   * @param options - Pagination and filtering options
+   * @returns Full timeline with events, anomalies, and summary
    *
    * @example
    * ```typescript
-   * await drip.endRun(run.id, {
-   *   status: 'COMPLETED',
-   * });
+   * const timeline = await drip.getRunTimeline('run_abc123');
    *
-   * // Or with error:
-   * await drip.endRun(run.id, {
-   *   status: 'FAILED',
-   *   errorMessage: 'Customer validation failed',
-   *   errorCode: 'VALIDATION_ERROR',
-   * });
+   * console.log(`Status: ${timeline.status}`);
+   * console.log(`Events: ${timeline.summary.totalEvents}`);
+   *
+   * for (const event of timeline.events) {
+   *   console.log(`${event.eventType}: ${event.outcome}`);
+   * }
    * ```
    */
-  async endRun(
+  override async getRunTimeline(
     runId: string,
-    params: EndRunParams,
-  ): Promise<{
-    id: string;
-    status: RunStatus;
-    endedAt: string | null;
-    durationMs: number | null;
-    eventCount: number;
-    totalCostUnits: string | null;
-  }> {
-    return this.request(`/runs/${runId}`, {
-      method: 'PATCH',
-      body: JSON.stringify(params),
-    });
-  }
+    options?: { limit?: number; cursor?: string; includeAnomalies?: boolean; collapseRetries?: boolean },
+  ): Promise<RunTimeline> {
+    const params = new URLSearchParams();
+    if (options?.limit) params.set('limit', options.limit.toString());
+    if (options?.cursor) params.set('cursor', options.cursor);
+    if (options?.includeAnomalies !== undefined) params.set('includeAnomalies', String(options.includeAnomalies));
+    if (options?.collapseRetries !== undefined) params.set('collapseRetries', String(options.collapseRetries));
 
-  // getRun(), getRunTimeline(), emitEvent() are inherited from DripCore.
+    const query = params.toString();
+    const path = query ? `/runs/${runId}/timeline?${query}` : `/runs/${runId}/timeline`;
+
+    return this.request<RunTimeline>(path);
+  }
 
   /**
    * Emits multiple events in a single request.
@@ -3545,7 +3858,7 @@ export class Drip extends DripCore {
    * console.log(`Created: ${result.created}, Duplicates: ${result.duplicates}`);
    * ```
    */
-  async emitEventsBatch(
+  override async emitEventsBatch(
     events: Array<Omit<EmitEventParams, 'runId'> & {
       runId?: string;
       customerId?: string;
@@ -3574,6 +3887,8 @@ export class Drip extends DripCore {
   // ==========================================================================
   // Simplified API Methods
   // ==========================================================================
+
+  // recordRun() is inherited from DripCore.
 
   /**
    * Lists all available meters (usage types) for your business.
@@ -3623,6 +3938,188 @@ export class Drip extends DripCore {
       })),
       count: response.count,
     };
+  }
+
+  // ==========================================================================
+  // Pricing Plan Management Methods
+  // ==========================================================================
+
+  /**
+   * Creates a new pricing plan for a usage type.
+   *
+   * Each `unitType` can only have one active plan. If you need to change prices,
+   * use `updatePricingPlan()` (which creates a new version) or deactivate the
+   * existing plan first.
+   *
+   * @param params - Pricing plan creation parameters
+   * @returns The created pricing plan
+   *
+   * @example
+   * ```typescript
+   * // Simple flat-rate plan
+   * const plan = await drip.createPricingPlan({
+   *   name: 'API Calls',
+   *   unitType: 'api_call',
+   *   unitPriceUsd: 0.001,
+   * });
+   *
+   * // Tiered pricing plan
+   * const tiered = await drip.createPricingPlan({
+   *   name: 'Token Usage',
+   *   unitType: 'token',
+   *   unitPriceUsd: 0.0001,
+   *   pricingModel: 'TIERED',
+   *   tiers: [
+   *     { minQuantity: 0, maxQuantity: 10000, unitPriceUsd: 0.0001 },
+   *     { minQuantity: 10000, maxQuantity: 100000, unitPriceUsd: 0.00008 },
+   *     { minQuantity: 100000, maxQuantity: null, unitPriceUsd: 0.00005 },
+   *   ],
+   * });
+   * ```
+   */
+  async createPricingPlan(
+    params: CreatePricingPlanParams,
+  ): Promise<PricingPlan> {
+    this.assertSecretKey('createPricingPlan()');
+    return this.request<PricingPlan>('/pricing-plans', {
+      method: 'POST',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Retrieves a pricing plan by ID.
+   *
+   * @param planId - The pricing plan ID
+   * @returns The pricing plan with tiers
+   *
+   * @example
+   * ```typescript
+   * const plan = await drip.getPricingPlan('plan_abc123');
+   * console.log(`${plan.name}: $${plan.unitPriceUsd}/${plan.unitType}`);
+   * console.log(`Model: ${plan.pricingModel}, Tiers: ${plan.tiers.length}`);
+   * ```
+   */
+  async getPricingPlan(planId: string): Promise<PricingPlan> {
+    this.assertSecretKey('getPricingPlan()');
+    return this.request<PricingPlan>(`/pricing-plans/${planId}`);
+  }
+
+  /**
+   * Lists all pricing plans for your business, including tiers.
+   *
+   * Unlike `listMeters()` (which returns a simplified view), this returns
+   * full plan details including pricing model, tiers, and timestamps.
+   *
+   * @returns List of pricing plans with full details
+   *
+   * @example
+   * ```typescript
+   * const { data: plans } = await drip.listPricingPlans();
+   *
+   * for (const plan of plans) {
+   *   console.log(`${plan.name} (${plan.unitType}): $${plan.unitPriceUsd}/unit [${plan.pricingModel}]`);
+   *   if (plan.tiers.length > 0) {
+   *     plan.tiers.forEach(t =>
+   *       console.log(`  ${t.minQuantity}–${t.maxQuantity ?? '∞'}: $${t.unitPriceUsd}`)
+   *     );
+   *   }
+   * }
+   * ```
+   */
+  async listPricingPlans(): Promise<ListPricingPlansResponse> {
+    this.assertSecretKey('listPricingPlans()');
+    return this.request<ListPricingPlansResponse>('/pricing-plans');
+  }
+
+  /**
+   * Updates a pricing plan.
+   *
+   * - **Metadata changes** (name, isActive) update the plan in place.
+   * - **Price changes** (unitPriceUsd, pricingModel, tiers) create a new version,
+   *   preserving billing history for existing charges.
+   *
+   * @param planId - The pricing plan ID
+   * @param params - Fields to update
+   * @returns The updated (or new version) pricing plan
+   *
+   * @example
+   * ```typescript
+   * // Rename a plan (metadata-only, no versioning)
+   * await drip.updatePricingPlan('plan_abc123', { name: 'Premium API Calls' });
+   *
+   * // Change price (creates a new version for billing history)
+   * const updated = await drip.updatePricingPlan('plan_abc123', {
+   *   unitPriceUsd: 0.002,
+   * });
+   *
+   * // Switch to tiered pricing
+   * await drip.updatePricingPlan('plan_abc123', {
+   *   pricingModel: 'TIERED',
+   *   tiers: [
+   *     { minQuantity: 0, maxQuantity: 1000, unitPriceUsd: 0.001 },
+   *     { minQuantity: 1000, maxQuantity: null, unitPriceUsd: 0.0005 },
+   *   ],
+   * });
+   *
+   * // Deactivate a plan (stops new charges, preserves history)
+   * await drip.updatePricingPlan('plan_abc123', { isActive: false });
+   * ```
+   */
+  async updatePricingPlan(
+    planId: string,
+    params: UpdatePricingPlanParams,
+  ): Promise<PricingPlan> {
+    this.assertSecretKey('updatePricingPlan()');
+    return this.request<PricingPlan>(`/pricing-plans/${planId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(params),
+    });
+  }
+
+  /**
+   * Soft-deletes a pricing plan by deactivating it.
+   *
+   * The plan is preserved for historical charges but will no longer be used
+   * for new usage events. You can reactivate it via `updatePricingPlan()`.
+   *
+   * @param planId - The pricing plan ID
+   *
+   * @example
+   * ```typescript
+   * await drip.deletePricingPlan('plan_abc123');
+   *
+   * // Reactivate later if needed:
+   * await drip.updatePricingPlan('plan_abc123', { isActive: true });
+   * ```
+   */
+  async deletePricingPlan(planId: string): Promise<void> {
+    this.assertSecretKey('deletePricingPlan()');
+    await this.request<void>(`/pricing-plans/${planId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  /**
+   * Looks up the active pricing plan for a specific usage type.
+   *
+   * Convenience method for finding the plan that would apply to a given
+   * meter/usage type without listing all plans.
+   *
+   * @param unitType - The usage type (e.g., "api_call", "token")
+   * @returns The active pricing plan for this unit type
+   *
+   * @example
+   * ```typescript
+   * const plan = await drip.getPricingPlanByType('api_call');
+   * console.log(`API calls cost $${plan.unitPriceUsd} each`);
+   * ```
+   */
+  async getPricingPlanByType(unitType: string): Promise<PricingPlan> {
+    this.assertSecretKey('getPricingPlanByType()');
+    return this.request<PricingPlan>(
+      `/pricing-plans/by-type/${encodeURIComponent(unitType)}`,
+    );
   }
 
   // ==========================================================================
@@ -3735,8 +4232,6 @@ export class Drip extends DripCore {
       }),
     });
   }
-
-  // recordRun() and _recordRunFallback() are inherited from DripCore.
 
   /**
    * Generates a deterministic idempotency key.
@@ -4060,7 +4555,20 @@ export class Drip extends DripCore {
    * ```
    */
   createStreamMeter(options: StreamMeterOptions): StreamMeter {
-    return new StreamMeter(this.charge.bind(this), options);
+    // StreamMeter previously used charge(); it now dispatches through
+    // trackUsage() which hits the same `/usage` billing endpoint.
+    return new StreamMeter(
+      (params) =>
+        this.trackUsage({
+          customerId: params.customerId,
+          externalCustomerId: params.externalCustomerId,
+          meter: params.meter,
+          quantity: params.quantity,
+          idempotencyKey: params.idempotencyKey,
+          metadata: params.metadata,
+        }) as unknown as Promise<ChargeResult>,
+      options,
+    );
   }
 
   // ==========================================================================
@@ -4129,389 +4637,135 @@ export class Drip extends DripCore {
   }
 
   // ==========================================================================
-  // Pricing Plan Methods
+  // Payload Mapping Engine
   // ==========================================================================
 
   /**
-   * Lists all pricing plans for your business.
+   * Creates a payload mapping that transforms arbitrary JSON into Drip's
+   * canonical usage event shape. Once created, your services can POST
+   * their native payloads to `/v1/ingest/:sourceName` and Drip walks the
+   * payload using restricted JSONPath rules to produce a canonical event.
+   *
+   * Requires a secret key (`sk_*`) with the `ADMIN` role.
+   *
+   * @example
+   * ```typescript
+   * const mapping = await drip.createPayloadMapping({
+   *   name: 'RPC Proxy Compute Units',
+   *   sourceName: 'rpc-proxy',
+   *   targetUnitType: 'eth_call_compute',
+   *   targetQuantityPath: '$.usage.compute_units',
+   *   targetCustomerIdPath: '$.request.customer',
+   *   targetIdempotencyPath: '$.request.id',
+   *   targetMetadataMap: { region: '$.meta.region' },
+   * });
+   * ```
    */
-  async listPricingPlans(): Promise<ListPricingPlansResponse> {
-    this.assertSecretKey('listPricingPlans()');
-    return this.request<ListPricingPlansResponse>('/pricing-plans');
-  }
-
-  /**
-   * Gets a pricing plan by ID.
-   */
-  async getPricingPlan(planId: string): Promise<PricingPlan> {
-    this.assertSecretKey('getPricingPlan()');
-    return this.request<PricingPlan>(`/pricing-plans/${planId}`);
-  }
-
-  /**
-   * Gets a pricing plan by unit type.
-   */
-  async getPricingPlanByUnitType(unitType: string): Promise<PricingPlan> {
-    this.assertSecretKey('getPricingPlanByUnitType()');
-    return this.request<PricingPlan>(`/pricing-plans/by-type/${encodeURIComponent(unitType)}`);
-  }
-
-  /**
-   * Creates a new pricing plan.
-   */
-  async createPricingPlan(params: CreatePricingPlanParams): Promise<PricingPlan> {
-    this.assertSecretKey('createPricingPlan()');
-    return this.request<PricingPlan>('/pricing-plans', {
+  async createPayloadMapping(
+    params: CreatePayloadMappingParams,
+  ): Promise<PayloadMapping> {
+    this.assertSecretKey('createPayloadMapping()');
+    return this.request<PayloadMapping>('/payload-mappings', {
       method: 'POST',
       body: JSON.stringify(params),
     });
   }
 
-  /**
-   * Updates an existing pricing plan.
-   */
-  async updatePricingPlan(planId: string, params: UpdatePricingPlanParams): Promise<PricingPlan> {
-    this.assertSecretKey('updatePricingPlan()');
-    return this.request<PricingPlan>(`/pricing-plans/${planId}`, {
-      method: 'PATCH',
-      body: JSON.stringify(params),
+  /** List all payload mappings for the authenticated business. */
+  async listPayloadMappings(): Promise<{ mappings: PayloadMapping[]; count: number }> {
+    this.assertSecretKey('listPayloadMappings()');
+    return this.request<{ mappings: PayloadMapping[]; count: number }>('/payload-mappings', {
+      method: 'GET',
+    });
+  }
+
+  /** Get a single payload mapping by ID. */
+  async getPayloadMapping(id: string): Promise<PayloadMapping> {
+    this.assertSecretKey('getPayloadMapping()');
+    return this.request<PayloadMapping>(`/payload-mappings/${id}`, {
+      method: 'GET',
     });
   }
 
   /**
-   * Deletes (deactivates) a pricing plan.
+   * Update a payload mapping. Each update appends an immutable
+   * snapshot to `payload_mapping_versions` for rollback / audit.
    */
-  async deletePricingPlan(planId: string): Promise<void> {
-    this.assertSecretKey('deletePricingPlan()');
-    await this.request<void>(`/pricing-plans/${planId}`, {
+  async updatePayloadMapping(
+    id: string,
+    patch: UpdatePayloadMappingParams,
+  ): Promise<PayloadMapping> {
+    this.assertSecretKey('updatePayloadMapping()');
+    return this.request<PayloadMapping>(`/payload-mappings/${id}`, {
+      method: 'PATCH',
+      body: JSON.stringify(patch),
+    });
+  }
+
+  /** Delete a payload mapping. */
+  async deletePayloadMapping(id: string): Promise<void> {
+    this.assertSecretKey('deletePayloadMapping()');
+    await this.request<void>(`/payload-mappings/${id}`, {
       method: 'DELETE',
     });
   }
 
-  // ==========================================================================
-  // Invoice Methods
-  // ==========================================================================
-
-  /**
-   * Generates an invoice from charges in a given period.
-   */
-  async generateInvoice(params: GenerateInvoiceParams): Promise<Invoice> {
-    this.assertSecretKey('generateInvoice()');
-    return this.request<Invoice>('/invoices/generate', {
-      method: 'POST',
-      body: JSON.stringify(params),
-    });
-  }
-
-  /**
-   * Generates an invoice from a subscription.
-   */
-  async generateSubscriptionInvoice(params: GenerateSubscriptionInvoiceParams): Promise<Invoice> {
-    this.assertSecretKey('generateSubscriptionInvoice()');
-    return this.request<Invoice>('/invoices/generate-from-subscription', {
-      method: 'POST',
-      body: JSON.stringify(params),
-    });
-  }
-
-  /**
-   * Lists invoices with optional filters.
-   */
-  async listInvoices(options?: ListInvoicesOptions): Promise<ListInvoicesResponse> {
-    this.assertSecretKey('listInvoices()');
-    const params = new URLSearchParams();
-    if (options?.customerId) params.set('customerId', options.customerId);
-    if (options?.status) params.set('status', options.status);
-    if (options?.startDate) params.set('startDate', options.startDate);
-    if (options?.endDate) params.set('endDate', options.endDate);
-    if (options?.limit) params.set('limit', options.limit.toString());
-    if (options?.offset) params.set('offset', options.offset.toString());
-    const query = params.toString();
-    return this.request<ListInvoicesResponse>(query ? `/invoices?${query}` : '/invoices');
-  }
-
-  /**
-   * Gets an invoice by ID.
-   */
-  async getInvoice(invoiceId: string): Promise<Invoice> {
-    this.assertSecretKey('getInvoice()');
-    return this.request<Invoice>(`/invoices/${invoiceId}`);
-  }
-
-  /**
-   * Issues (finalizes) a draft invoice.
-   */
-  async issueInvoice(invoiceId: string): Promise<Invoice> {
-    this.assertSecretKey('issueInvoice()');
-    return this.request<Invoice>(`/invoices/${invoiceId}/issue`, {
-      method: 'POST',
-    });
-  }
-
-  /**
-   * Marks an invoice as paid.
-   */
-  async markInvoicePaid(invoiceId: string, amount?: string): Promise<Invoice> {
-    this.assertSecretKey('markInvoicePaid()');
-    return this.request<Invoice>(`/invoices/${invoiceId}/paid`, {
-      method: 'POST',
-      body: JSON.stringify(amount ? { amount } : {}),
-    });
-  }
-
-  /**
-   * Voids an invoice.
-   */
-  async voidInvoice(invoiceId: string, reason: string): Promise<Invoice> {
-    this.assertSecretKey('voidInvoice()');
-    return this.request<Invoice>(`/invoices/${invoiceId}/void`, {
-      method: 'POST',
-      body: JSON.stringify({ reason }),
-    });
-  }
-
-  /**
-   * Gets invoice summary statistics.
-   */
-  async getInvoiceSummary(): Promise<InvoiceSummary> {
-    this.assertSecretKey('getInvoiceSummary()');
-    return this.request<InvoiceSummary>('/invoices/summary');
-  }
-
-  /**
-   * Downloads an invoice as PDF. Returns the raw Response for streaming.
-   */
-  async getInvoicePdf(invoiceId: string): Promise<ArrayBuffer> {
-    this.assertSecretKey('getInvoicePdf()');
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
-    try {
-      const res = await fetch(`${this.baseUrl}/invoices/${invoiceId}/pdf`, {
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new DripError(text || `HTTP ${res.status}`, res.status, 'PDF_DOWNLOAD_FAILED');
-      }
-      return res.arrayBuffer();
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  // ==========================================================================
-  // Charge Refund & Export Methods
-  // ==========================================================================
-
-  /**
-   * Refunds a charge.
-   */
-  async refundCharge(chargeId: string, params: RefundChargeParams): Promise<RefundResult> {
-    this.assertSecretKey('refundCharge()');
-    return this.request<RefundResult>(`/charges/${chargeId}/refund`, {
-      method: 'POST',
-      body: JSON.stringify(params),
-    });
-  }
-
-  /**
-   * Exports all charges as JSON or CSV.
-   */
-  async exportCharges(format: 'json' | 'csv' = 'json'): Promise<string> {
-    this.assertSecretKey('exportCharges()');
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
-    try {
-      const res = await fetch(`${this.baseUrl}/charges/export?format=${format}`, {
-        signal: controller.signal,
-        headers: {
-          Authorization: `Bearer ${this.apiKey}`,
-        },
-      });
-      if (!res.ok) {
-        const text = await res.text().catch(() => '');
-        throw new DripError(text || `HTTP ${res.status}`, res.status, 'EXPORT_FAILED');
-      }
-      return res.text();
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  // ==========================================================================
-  // Webhook Delivery Methods
-  // ==========================================================================
-
-  /**
-   * Lists delivery attempts for a webhook.
-   */
-  async listWebhookDeliveries(webhookId: string, limit?: number): Promise<ListWebhookDeliveriesResponse> {
-    this.assertSecretKey('listWebhookDeliveries()');
-    const params = new URLSearchParams();
-    if (limit) params.set('limit', limit.toString());
-    const query = params.toString();
-    return this.request<ListWebhookDeliveriesResponse>(
-      query ? `/webhooks/${webhookId}/deliveries?${query}` : `/webhooks/${webhookId}/deliveries`,
+  /** List historical version snapshots for a payload mapping. */
+  async listPayloadMappingVersions(
+    id: string,
+  ): Promise<{ versions: PayloadMappingVersion[]; count: number }> {
+    this.assertSecretKey('listPayloadMappingVersions()');
+    return this.request<{ versions: PayloadMappingVersion[]; count: number }>(
+      `/payload-mappings/${id}/versions`,
+      { method: 'GET' },
     );
   }
 
   /**
-   * Gets a specific webhook delivery.
+   * Dry-run a payload mapping against a sample payload. Returns the
+   * canonical event Drip *would* record — no side effects, no DB write.
    */
-  async getWebhookDelivery(webhookId: string, deliveryId: string): Promise<WebhookDelivery> {
-    this.assertSecretKey('getWebhookDelivery()');
-    return this.request<WebhookDelivery>(`/webhooks/${webhookId}/deliveries/${deliveryId}`);
-  }
-
-  /**
-   * Retries a failed webhook delivery.
-   */
-  async retryWebhookDelivery(webhookId: string, deliveryId: string): Promise<{ message: string; deliveryId: string }> {
-    this.assertSecretKey('retryWebhookDelivery()');
-    return this.request<{ message: string; deliveryId: string }>(`/webhooks/${webhookId}/deliveries/${deliveryId}/retry`, {
-      method: 'POST',
-    });
-  }
-
-  /**
-   * Bulk-retries all failed deliveries for a webhook.
-   */
-  async retryFailedDeliveries(webhookId: string): Promise<{ message: string; retriedCount: number }> {
-    this.assertSecretKey('retryFailedDeliveries()');
-    return this.request<{ message: string; retriedCount: number }>(`/webhooks/${webhookId}/retry-failed`, {
-      method: 'POST',
-    });
-  }
-
-  /**
-   * Enables (or re-enables) a webhook endpoint.
-   */
-  async enableWebhook(webhookId: string): Promise<{ message: string; healthStatus: string }> {
-    this.assertSecretKey('enableWebhook()');
-    return this.request<{ message: string; healthStatus: string }>(`/webhooks/${webhookId}/enable`, {
-      method: 'POST',
-    });
-  }
-
-  // ==========================================================================
-  // Additional Event & Trace Methods
-  // ==========================================================================
-
-  /**
-   * Lists events for a specific customer.
-   */
-  async listCustomerEvents(customerId: string, options?: Omit<ListEventsOptions, 'customerId'>): Promise<ListEventsResponse> {
-    this.assertSecretKey('listCustomerEvents()');
-    const params = new URLSearchParams();
-    if (options?.runId) params.set('runId', options.runId);
-    if (options?.eventType) params.set('eventType', options.eventType);
-    if (options?.outcome) params.set('outcome', options.outcome);
-    if (options?.limit) params.set('limit', options.limit.toString());
-    if (options?.offset) params.set('offset', options.offset.toString());
-    const query = params.toString();
-    return this.request<ListEventsResponse>(
-      query ? `/customers/${customerId}/events?${query}` : `/customers/${customerId}/events`,
+  async dryRunPayloadMapping(
+    id: string,
+    payload: Record<string, unknown>,
+  ): Promise<PayloadMappingDryRunResult> {
+    this.assertSecretKey('dryRunPayloadMapping()');
+    return this.request<PayloadMappingDryRunResult>(
+      `/payload-mappings/${id}/dry-run`,
+      {
+        method: 'POST',
+        body: JSON.stringify({ payload }),
+      },
     );
   }
 
   /**
-   * Gets the raw payload of an event.
+   * Ingest a raw payload via a named payload mapping. The payload is
+   * transformed on the edge using the mapping's rules and recorded as
+   * a canonical usage event.
+   *
+   * Requires a secret key (`sk_*`) with the `OPERATOR` role or higher.
+   *
+   * @example
+   * ```typescript
+   * await drip.ingestViaMapping('rpc-proxy', {
+   *   request: { method: 'eth_call', customer: 'cus_abc', id: 'req-1' },
+   *   usage:   { compute_units: 17, cache_hit: false },
+   *   meta:    { region: 'us-east-1' },
+   * });
+   * ```
    */
-  async getEventPayload(eventId: string): Promise<Record<string, unknown>> {
-    this.assertSecretKey('getEventPayload()');
-    return this.request<Record<string, unknown>>(`/events/${eventId}/payload`);
-  }
-
-  /**
-   * Gets a trace by correlation ID, grouping events across runs.
-   */
-  async getCorrelationTrace(correlationId: string): Promise<CorrelationTrace> {
-    this.assertSecretKey('getCorrelationTrace()');
-    return this.request<CorrelationTrace>(`/trace/${encodeURIComponent(correlationId)}`);
-  }
-
-  // ==========================================================================
-  // Additional Checkout Methods
-  // ==========================================================================
-
-  /**
-   * Gets details of a checkout session including available payment methods.
-   */
-  async getCheckoutSession(sessionId: string): Promise<CheckoutSession> {
-    return this.request<CheckoutSession>(`/checkout/${sessionId}`);
-  }
-
-  /**
-   * Initializes payment for a checkout session.
-   */
-  async payCheckoutSession(sessionId: string, paymentMethod: 'ACH' | 'DEBIT_CARD' | 'CREDIT_CARD' | 'USDC'): Promise<{
-    paymentUrl: string | null;
-    depositAddress: string | null;
-    amountUsdc: string | null;
-  }> {
-    const response = await this.request<{
-      payment_url: string | null;
-      deposit_address: string | null;
-      amount_usdc: string | null;
-    }>(`/checkout/${sessionId}/pay`, {
-      method: 'POST',
-      body: JSON.stringify({ payment_method: paymentMethod }),
-    });
-    return {
-      paymentUrl: response.payment_url,
-      depositAddress: response.deposit_address,
-      amountUsdc: response.amount_usdc,
-    };
-  }
-
-  // ==========================================================================
-  // Additional Withdrawal Methods
-  // ==========================================================================
-
-  /**
-   * Confirms a pending withdrawal.
-   */
-  async confirmWithdrawal(withdrawalId: string): Promise<WithdrawalResult> {
-    this.assertSecretKey('confirmWithdrawal()');
-    const response = await this.request<{
-      id: string;
-      status: string;
-      amount_usdc: string;
-      fee_usdc: string;
-      net_amount_usdc: string;
-      fiat_currency: string;
-      bank_description: string | null;
-      created_at: string;
-      completed_at: string | null;
-    }>(`/withdrawals/${withdrawalId}/confirm`, {
-      method: 'POST',
-    });
-    return {
-      id: response.id,
-      status: response.status as WithdrawalStatus,
-      amountUsdc: response.amount_usdc,
-      feeUsdc: response.fee_usdc,
-      netAmountUsdc: response.net_amount_usdc,
-      fiatCurrency: response.fiat_currency,
-      bankDescription: response.bank_description,
-      createdAt: response.created_at,
-      completedAt: response.completed_at,
-    };
-  }
-
-  // ==========================================================================
-  // Additional Entitlement Methods
-  // ==========================================================================
-
-  /**
-   * Gets entitlement usage summary for a customer.
-   */
-  async getEntitlementUsage(customerId: string): Promise<EntitlementUsageSummary> {
-    this.assertSecretKey('getEntitlementUsage()');
-    return this.request<EntitlementUsageSummary>(`/customers/${customerId}/entitlement/usage`);
+  async ingestViaMapping(
+    sourceName: string,
+    payload: Record<string, unknown>,
+  ): Promise<PayloadMappingIngestResult> {
+    return this.request<PayloadMappingIngestResult>(
+      `/ingest/${encodeURIComponent(sourceName)}`,
+      {
+        method: 'POST',
+        body: JSON.stringify(payload),
+      },
+    );
   }
 }
 
