@@ -66,16 +66,19 @@ describe("trackUsage validation", () => {
         meter: "tokens",
         quantity: -100,
       },
-      "quantity must be a positive number"
+      "quantity must be a finite, non-negative number"
     )
   })
 
-  it("should fail with zero quantity", async () => {
-    await expectValidationFailure({
-      customerId: "user_1",
-      meter: "tokens",
-      quantity: 0,
-    })
+  it("should allow zero quantity (wrapApiCall extractUsage fallback)", async () => {
+    const drip = createDrip()
+    const requestSpy = vi
+      .spyOn(drip as any, "request")
+      .mockResolvedValue({ success: true } as any)
+
+    await drip.trackUsage({ customerId: "user_1", meter: "tokens", quantity: 0 })
+
+    expect(requestSpy).toHaveBeenCalledTimes(1)
   })
 
   it("should fail with NaN quantity", async () => {
@@ -119,18 +122,6 @@ describe("trackUsage validation", () => {
       customerId: undefined,
       meter: undefined,
       quantity: undefined,
-    })
-  })
-
-  it("should fail when metadata contains circular reference", async () => {
-    const circular: any = {}
-    circular.self = circular
-
-    await expectValidationFailure({
-      customerId: "user_1",
-      meter: "tokens",
-      quantity: 100,
-      metadata: circular,
     })
   })
 

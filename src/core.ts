@@ -1269,25 +1269,31 @@ export class Drip {
    * }
    * ```
    */
-
   async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
   async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
   async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
-      if (!params.customerId || typeof params.customerId !== "string") {
-  throw new DripError("customerId is required", 400, "INVALID_INPUT")
-}
-
-if (!params.meter || typeof params.meter !== "string") {
-  throw new DripError("meter is required", 400, "INVALID_INPUT")
-}
-
-if (typeof params.quantity !== "number" || params.quantity <= 0) {
-  throw new DripError("quantity must be a positive number", 400, "INVALID_INPUT")
-}
-
-if (params.mode && !["sync", "batch"].includes(params.mode)) {
-  throw new DripError("mode must be 'sync' or 'batch'", 400, "INVALID_INPUT")
-}
+    // Client-side validation: fail fast before any network call. Quantity 0 is
+    // still allowed (see Drip.trackUsage in index.ts).
+    if (typeof params.customerId !== 'string' || params.customerId.trim() === '') {
+      throw new DripError('trackUsage(): customerId must be a non-empty string', 400, 'VALIDATION_ERROR');
+    }
+    if (typeof params.meter !== 'string' || params.meter.trim() === '') {
+      throw new DripError('trackUsage(): meter must be a non-empty string', 400, 'VALIDATION_ERROR');
+    }
+    if (typeof params.quantity !== 'number' || !Number.isFinite(params.quantity) || params.quantity < 0) {
+      throw new DripError(
+        'trackUsage(): quantity must be a finite, non-negative number',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    if (params.mode !== undefined && params.mode !== 'sync' && params.mode !== 'batch') {
+      throw new DripError(
+        `trackUsage(): invalid mode '${String(params.mode)}': expected 'sync' or 'batch'`,
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
     const idempotencyKey = params.idempotencyKey
       ?? deterministicIdempotencyKey('track', params.customerId, params.meter, params.quantity);
     const mode = params.mode ?? 'sync';
