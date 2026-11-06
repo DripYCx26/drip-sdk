@@ -24,10 +24,7 @@ import { DripMiddlewareError } from './types.js';
 
 const DEFAULT_PAYMENT_EXPIRY_SEC = 5 * 60; // 5 minutes
 const MAX_TIMESTAMP_AGE_SEC = 5 * 60; // 5 minutes max age for payment proof timestamps
-const DEFAULT_METADATA_MAX_STRING_LENGTH = 256;
-
-const SENSITIVE_METADATA_KEY_PATTERN =
-  /(authorization|api[_-]?key|secret|password|token|prompt|completion|output|input|request|response|body|cookie|set-cookie|email|phone|ssn|address|creditcard|card)/i;
+import { sanitizeMetadata as _sanitizeMetadata } from '../sanitize.js';
 
 const DEFAULT_REDACT_METADATA_KEYS = [
   'authorization',
@@ -245,21 +242,10 @@ function hashString(input: string): string {
   return `0x${hash}`;
 }
 
-function isMetadataPrimitive(value: unknown): value is string | number | boolean | null {
-  if (value === null) {
-    return true;
-  }
-  return typeof value === 'string' || typeof value === 'number' || typeof value === 'boolean';
-}
-
 function sanitizeChargeMetadata<TRequest>(
   metadata: Record<string, unknown> | undefined,
   config: Pick<WithDripConfig<TRequest>, 'metadataAllowlist' | 'redactMetadataKeys'>,
 ): Record<string, unknown> {
-  if (!metadata) {
-    return {};
-  }
-
   const allowlist = config.metadataAllowlist
     ? new Set([...config.metadataAllowlist, ...config.metadataAllowlist.map((k) => k.toLowerCase())])
     : null;
@@ -268,35 +254,7 @@ function sanitizeChargeMetadata<TRequest>(
     ? new Set([...config.redactMetadataKeys, ...config.redactMetadataKeys.map((k) => k.toLowerCase())])
     : new Set([...DEFAULT_REDACT_METADATA_KEYS, ...DEFAULT_REDACT_METADATA_KEYS.map((k) => k.toLowerCase())]);
 
-  const sanitized: Record<string, unknown> = {};
-
-  for (const [key, value] of Object.entries(metadata)) {
-    const normalizedKey = key.toLowerCase();
-
-    if (allowlist && !allowlist.has(key) && !allowlist.has(normalizedKey)) {
-      continue;
-    }
-    if (redactKeys.has(key) || redactKeys.has(normalizedKey)) {
-      continue;
-    }
-    if (SENSITIVE_METADATA_KEY_PATTERN.test(key)) {
-      continue;
-    }
-    if (!isMetadataPrimitive(value)) {
-      continue;
-    }
-    if (typeof value === 'number' && !Number.isFinite(value)) {
-      continue;
-    }
-    if (typeof value === 'string' && value.length > DEFAULT_METADATA_MAX_STRING_LENGTH) {
-      sanitized[key] = value.slice(0, DEFAULT_METADATA_MAX_STRING_LENGTH);
-      continue;
-    }
-
-    sanitized[key] = value;
-  }
-
-  return sanitized;
+  return _sanitizeMetadata(metadata, { allowlist, redactKeys });
 }
 
 // ============================================================================

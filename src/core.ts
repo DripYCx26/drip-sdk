@@ -839,53 +839,15 @@ import { DripError } from './errors.js';
 // ============================================================================
 
 /**
- * Drip SDK Core - Essential API for pilots and new integrations.
- *
- * Two core concepts:
- * - **Usage tracking**: `trackUsage()` - record usage without billing
- * - **Execution logging**: `recordRun()` - track request/run lifecycle with events
- *
- * For billing (`charge()`), webhooks, and advanced features:
- * ```typescript
- * import { Drip } from '@drip-sdk/node';
- * ```
- *
- * @example
- * ```typescript
- * import { Drip } from '@drip-sdk/node/core';
- *
- * const drip = new Drip({ apiKey: process.env.DRIP_API_KEY! });
- *
- * // Verify connection
- * const health = await drip.ping();
- * console.log(`API healthy: ${health.ok}`);
- *
- * // Track usage (no billing)
- * await drip.trackUsage({
- *   customerId: 'cust_123',
- *   meter: 'api_calls',
- *   quantity: 1,
- * });
- *
- * // Record a complete request/run with events
- * const result = await drip.recordRun({
- *   customerId: 'cust_123',
- *   workflow: 'rpc-request',  // or 'api-request', 'agent-run'
- *   events: [
- *     { eventType: 'request.start' },
- *     { eventType: 'llm.call', quantity: 1500, units: 'tokens' },
- *     { eventType: 'request.end' },
- *   ],
- *   status: 'COMPLETED',
- * });
- *
- * console.log(result.summary);
- * ```
+ * Shared Drip client base: configuration, the authenticated request pipeline,
+ * and every API method whose contract is identical in `@drip-sdk/node/core`
+ * and `@drip-sdk/node`. Each entry point's `Drip` class extends this and adds
+ * the methods whose contracts differ (for example `trackUsage()`).
  */
-export class Drip {
-  private readonly apiKey: string;
-  private readonly baseUrl: string;
-  private readonly timeout: number;
+export class DripCore {
+  protected readonly apiKey: string;
+  protected readonly baseUrl: string;
+  protected readonly timeout: number;
 
   /**
    * The type of API key being used.
@@ -956,7 +918,7 @@ export class Drip {
    * Asserts that the SDK was initialized with a secret key (sk_).
    * @internal
    */
-  private assertSecretKey(operation: string): void {
+  protected assertSecretKey(operation: string): void {
     if (this.keyType === 'public') {
       throw new DripError(
         `${operation} requires a secret key (sk_). You are using a public key (pk_), which cannot access this endpoint. ` +
@@ -971,7 +933,7 @@ export class Drip {
    * Makes an authenticated request to the Drip API.
    * @internal
    */
-  private async request<T>(
+  protected async request<T>(
     path: string,
     options: RequestInit = {},
   ): Promise<T> {
@@ -1237,103 +1199,17 @@ export class Drip {
   }
 
   // ==========================================================================
-  // Usage Tracking (No Billing)
-  // ==========================================================================
-
-  /**
-   * Records usage for tracking WITHOUT billing.
-   *
-   * Use this for:
-   * - Pilot programs (track before billing)
-   * - Internal team usage
-   * - Pre-billing tracking before customer setup
-   *
-   * For actual billing, use `charge()` from the full SDK.
-   *
-   * @param params - Usage tracking parameters
-   * @returns The tracked usage event
-   *
-   * @example
-   * ```typescript
-   * const result = await drip.trackUsage({
-   *   customerId: 'cust_abc123',
-   *   meter: 'api_calls',
-   *   quantity: 100,
-   *   description: 'API calls during pilot',
-   * });
-   *
-   * if (result.mode === 'sync') {
-   *   console.log(`Tracked: ${result.usageEventId}`);
-   * } else {
-   *   console.log(`Queued with key: ${result.idempotencyKey}`);
-   * }
-   * ```
-   */
-  async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
-  async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
-  async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
-    // Client-side validation: fail fast before any network call. Quantity 0 is
-    // still allowed (see Drip.trackUsage in index.ts).
-    if (typeof params.customerId !== 'string' || params.customerId.trim() === '') {
-      throw new DripError('trackUsage(): customerId must be a non-empty string', 400, 'VALIDATION_ERROR');
-    }
-    if (typeof params.meter !== 'string' || params.meter.trim() === '') {
-      throw new DripError('trackUsage(): meter must be a non-empty string', 400, 'VALIDATION_ERROR');
-    }
-    if (typeof params.quantity !== 'number' || !Number.isFinite(params.quantity) || params.quantity < 0) {
-      throw new DripError(
-        'trackUsage(): quantity must be a finite, non-negative number',
-        400,
-        'VALIDATION_ERROR',
-      );
-    }
-    if (params.mode !== undefined && params.mode !== 'sync' && params.mode !== 'batch') {
-      throw new DripError(
-        `trackUsage(): invalid mode '${String(params.mode)}': expected 'sync' or 'batch'`,
-        400,
-        'VALIDATION_ERROR',
-      );
-    }
-    const idempotencyKey = params.idempotencyKey
-      ?? deterministicIdempotencyKey('track', params.customerId, params.meter, params.quantity);
-    const mode = params.mode ?? 'sync';
-    const path = mode === 'sync' ? '/usage/internal' : '/usage/internal/batch';
-
-    const result = await this.request<TrackUsageResult>(path, {
-      method: 'POST',
-      body: JSON.stringify({
-        customerId: params.customerId,
-        usageType: params.meter,
-        quantity: params.quantity,
-        idempotencyKey,
-        units: params.units,
-        description: params.description,
-        metadata: params.metadata,
-      }),
-    });
-
-    if (mode === 'batch') {
-      return {
-        ...(result as TrackUsageBatchResult),
-        mode: 'batch',
-      };
-    }
-
-    return result as TrackUsageSyncResult;
-  }
-
-  // ==========================================================================
   // Private Workflow Methods (used by recordRun)
   // ==========================================================================
 
-  private async createWorkflow(params: CreateWorkflowParams): Promise<Workflow> {
+  protected async createWorkflow(params: CreateWorkflowParams): Promise<Workflow> {
     return this.request<Workflow>('/workflows', {
       method: 'POST',
       body: JSON.stringify(params),
     });
   }
 
-  private async listWorkflows(): Promise<{ data: Workflow[]; count: number }> {
+  protected async listWorkflows(): Promise<{ data: Workflow[]; count: number }> {
     return this.request<{ data: Workflow[]; count: number }>('/workflows');
   }
 
@@ -1836,6 +1712,138 @@ export class Drip {
         body: JSON.stringify(opts),
       },
     );
+  }
+}
+
+/**
+ * Drip SDK Core - Essential API for pilots and new integrations.
+ *
+ * Two core concepts:
+ * - **Usage tracking**: `trackUsage()` - record usage without billing
+ * - **Execution logging**: `recordRun()` - track request/run lifecycle with events
+ *
+ * For billing (`charge()`), webhooks, and advanced features:
+ * ```typescript
+ * import { Drip } from '@drip-sdk/node';
+ * ```
+ *
+ * @example
+ * ```typescript
+ * import { Drip } from '@drip-sdk/node/core';
+ *
+ * const drip = new Drip({ apiKey: process.env.DRIP_API_KEY! });
+ *
+ * // Verify connection
+ * const health = await drip.ping();
+ * console.log(`API healthy: ${health.ok}`);
+ *
+ * // Track usage (no billing)
+ * await drip.trackUsage({
+ *   customerId: 'cust_123',
+ *   meter: 'api_calls',
+ *   quantity: 1,
+ * });
+ *
+ * // Record a complete request/run with events
+ * const result = await drip.recordRun({
+ *   customerId: 'cust_123',
+ *   workflow: 'rpc-request',  // or 'api-request', 'agent-run'
+ *   events: [
+ *     { eventType: 'request.start' },
+ *     { eventType: 'llm.call', quantity: 1500, units: 'tokens' },
+ *     { eventType: 'request.end' },
+ *   ],
+ *   status: 'COMPLETED',
+ * });
+ *
+ * console.log(result.summary);
+ * ```
+ */
+export class Drip extends DripCore {
+  // ==========================================================================
+  // Usage Tracking (No Billing)
+  // ==========================================================================
+
+  /**
+   * Records usage for tracking WITHOUT billing.
+   *
+   * Use this for:
+   * - Pilot programs (track before billing)
+   * - Internal team usage
+   * - Pre-billing tracking before customer setup
+   *
+   * For actual billing, use `charge()` from the full SDK.
+   *
+   * @param params - Usage tracking parameters
+   * @returns The tracked usage event
+   *
+   * @example
+   * ```typescript
+   * const result = await drip.trackUsage({
+   *   customerId: 'cust_abc123',
+   *   meter: 'api_calls',
+   *   quantity: 100,
+   *   description: 'API calls during pilot',
+   * });
+   *
+   * if (result.mode === 'sync') {
+   *   console.log(`Tracked: ${result.usageEventId}`);
+   * } else {
+   *   console.log(`Queued with key: ${result.idempotencyKey}`);
+   * }
+   * ```
+   */
+  async trackUsage(params: TrackUsageBatchParams): Promise<TrackUsageBatchResult>;
+  async trackUsage(params: TrackUsageSyncParams): Promise<TrackUsageSyncResult>;
+  async trackUsage(params: TrackUsageParams): Promise<TrackUsageResult> {
+    // Client-side validation: fail fast before any network call. Quantity 0 is
+    // still allowed (see Drip.trackUsage in index.ts).
+    if (typeof params.customerId !== 'string' || params.customerId.trim() === '') {
+      throw new DripError('trackUsage(): customerId must be a non-empty string', 400, 'VALIDATION_ERROR');
+    }
+    if (typeof params.meter !== 'string' || params.meter.trim() === '') {
+      throw new DripError('trackUsage(): meter must be a non-empty string', 400, 'VALIDATION_ERROR');
+    }
+    if (typeof params.quantity !== 'number' || !Number.isFinite(params.quantity) || params.quantity < 0) {
+      throw new DripError(
+        'trackUsage(): quantity must be a finite, non-negative number',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    if (params.mode !== undefined && params.mode !== 'sync' && params.mode !== 'batch') {
+      throw new DripError(
+        `trackUsage(): invalid mode '${String(params.mode)}': expected 'sync' or 'batch'`,
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    const idempotencyKey = params.idempotencyKey
+      ?? deterministicIdempotencyKey('track', params.customerId, params.meter, params.quantity);
+    const mode = params.mode ?? 'sync';
+    const path = mode === 'sync' ? '/usage/internal' : '/usage/internal/batch';
+
+    const result = await this.request<TrackUsageResult>(path, {
+      method: 'POST',
+      body: JSON.stringify({
+        customerId: params.customerId,
+        usageType: params.meter,
+        quantity: params.quantity,
+        idempotencyKey,
+        units: params.units,
+        description: params.description,
+        metadata: params.metadata,
+      }),
+    });
+
+    if (mode === 'batch') {
+      return {
+        ...(result as TrackUsageBatchResult),
+        mode: 'batch',
+      };
+    }
+
+    return result as TrackUsageSyncResult;
   }
 }
 
