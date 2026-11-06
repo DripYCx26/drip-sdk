@@ -2981,6 +2981,34 @@ export class Drip extends DripCore {
     // even when callers omit meter/quantity. These match the server defaults.
     const meter = params.meter ?? 'generic';
     const quantity = params.quantity ?? 1;
+    // Client-side validation: fail fast before any network call, retry, or
+    // circuit-breaker interaction. Quantity 0 is intentionally still allowed so
+    // that wrapApiCall()'s documented `extractUsage: (r) => ... ?? 0` fallback
+    // keeps recording after the external call has already succeeded.
+    if (typeof identity !== 'string' || identity.trim() === '') {
+      throw new DripError(
+        'trackUsage(): customerId / externalCustomerId must be a non-empty string',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    if (typeof meter !== 'string' || meter.trim() === '') {
+      throw new DripError('trackUsage(): meter must be a non-empty string', 400, 'VALIDATION_ERROR');
+    }
+    if (typeof quantity !== 'number' || !Number.isFinite(quantity) || quantity < 0) {
+      throw new DripError(
+        'trackUsage(): quantity must be a finite, non-negative number',
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
+    if (params.mode !== undefined && !['sync', 'batch', 'internal'].includes(params.mode)) {
+      throw new DripError(
+        `trackUsage(): invalid mode '${String(params.mode)}': expected one of sync, batch, internal`,
+        400,
+        'VALIDATION_ERROR',
+      );
+    }
     const idempotencyKey = params.idempotencyKey
       ?? deterministicIdempotencyKey('track', identity, meter, quantity);
     const mode = params.mode ?? 'sync';
